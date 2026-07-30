@@ -97,6 +97,215 @@ export interface WebRelayOptions {
 const PAIRING_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
 
+function animationDraftOpenApiSchema(): JsonObject {
+  const vector3 = {
+    type: "object",
+    required: ["x", "y", "z"],
+    properties: {
+      x: { type: "number" },
+      y: { type: "number" },
+      z: { type: "number" },
+    },
+    additionalProperties: false,
+  };
+  const quaternion = {
+    type: "object",
+    required: ["x", "y", "z", "w"],
+    properties: {
+      x: { type: "number" },
+      y: { type: "number" },
+      z: { type: "number" },
+      w: { type: "number" },
+    },
+    additionalProperties: false,
+  };
+  const transform = {
+    type: "object",
+    required: ["position", "rotation"],
+    properties: {
+      position: vector3,
+      rotation: quaternion,
+    },
+    additionalProperties: false,
+  };
+  const easing = {
+    type: "object",
+    required: ["style", "direction"],
+    properties: {
+      style: {
+        type: "string",
+        enum: ["linear", "constant", "cubic", "cubicV2", "elastic", "bounce"],
+      },
+      direction: { type: "string", enum: ["in", "out", "inOut"] },
+    },
+    additionalProperties: false,
+  };
+  const poseKey = {
+    type: "object",
+    required: ["time", "transform", "easing"],
+    properties: {
+      time: { type: "number", minimum: 0 },
+      transform,
+      easing,
+      weight: { type: "number", minimum: 0, maximum: 1, default: 1 },
+      tangentIn: vector3,
+      tangentOut: vector3,
+    },
+    additionalProperties: false,
+  };
+  const jointTrack = {
+    type: "object",
+    required: ["joint", "keys"],
+    properties: {
+      joint: {
+        type: "string",
+        minLength: 1,
+        description: "Exact joint or Motor6D name reported by inspectRig.",
+      },
+      space: {
+        type: "string",
+        enum: ["local", "motor", "parent", "character", "world"],
+        default: "motor",
+      },
+      keys: { type: "array", minItems: 1, items: poseKey },
+    },
+    additionalProperties: false,
+  };
+  const performanceBeat = {
+    type: "object",
+    required: ["id", "label", "startTime", "endTime", "intention", "energy"],
+    properties: {
+      id: { type: "string", minLength: 1 },
+      label: { type: "string", minLength: 1 },
+      startTime: { type: "number", minimum: 0 },
+      endTime: { type: "number", minimum: 0 },
+      intention: { type: "string", minLength: 1 },
+      energy: { type: "number", minimum: 0, maximum: 1 },
+      leadingBodyPart: { type: "string" },
+      focalTarget: { type: "string" },
+    },
+    additionalProperties: false,
+  };
+  const contact = {
+    type: "object",
+    required: ["id", "effector", "target", "startTime", "endTime"],
+    properties: {
+      id: { type: "string", minLength: 1 },
+      effector: { type: "string", minLength: 1 },
+      target: { type: "string", minLength: 1 },
+      startTime: { type: "number", minimum: 0 },
+      endTime: { type: "number", minimum: 0 },
+      positionWeight: { type: "number", minimum: 0, maximum: 1, default: 1 },
+      rotationWeight: { type: "number", minimum: 0, maximum: 1, default: 0 },
+      allowSlideMeters: { type: "number", minimum: 0, default: 0.005 },
+    },
+    additionalProperties: false,
+  };
+  return {
+    type: "object",
+    required: ["name", "rigId", "duration", "priority", "tracks"],
+    description:
+      "Complete semantic animation authored after inspecting the selected rig. Quaternion rotations use x, y, z, w.",
+    properties: {
+      name: { type: "string", minLength: 1 },
+      rigId: {
+        type: "string",
+        minLength: 1,
+        description: "Rig identifier or path returned by inspectRig.",
+      },
+      duration: { type: "number", exclusiveMinimum: 0, maximum: 300 },
+      framesPerSecond: {
+        type: "integer",
+        minimum: 12,
+        maximum: 120,
+        default: 30,
+      },
+      looped: { type: "boolean", default: false },
+      priority: {
+        type: "string",
+        enum: ["core", "idle", "movement", "action", "action2", "action3", "action4"],
+      },
+      authoredHipHeight: { type: "number" },
+      beats: { type: "array", items: performanceBeat, default: [] },
+      contacts: { type: "array", items: contact, default: [] },
+      tracks: { type: "array", items: jointTrack },
+      metadata: {
+        type: "object",
+        required: ["version"],
+        properties: {
+          intent: { type: "string" },
+          rigType: { type: "string", enum: ["R6", "R15", "Custom"] },
+          style: { type: "array", items: { type: "string" }, default: [] },
+          version: { type: "integer", const: 1 },
+        },
+        additionalProperties: false,
+      },
+    },
+    additionalProperties: false,
+  };
+}
+
+function actionInputOpenApiSchema(): JsonObject {
+  return {
+    type: "object",
+    description:
+      "Action-specific parameters. validateAnimationDraft requires draft. stageAnimationDraft requires transactionName and draft.",
+    properties: {
+      transactionName: {
+        type: "string",
+        minLength: 1,
+        maxLength: 120,
+        description: "Required by stageAnimationDraft; names the reversible staging transaction.",
+      },
+      draft: animationDraftOpenApiSchema(),
+      transactionId: {
+        type: "string",
+        minLength: 1,
+        maxLength: 160,
+        description: "Returned by staging and required to commit or discard that draft.",
+      },
+      destinationName: {
+        type: "string",
+        minLength: 1,
+        maxLength: 120,
+        description: "AnimSave destination name used by commitAnimationDraft.",
+      },
+      namePrefix: {
+        type: "string",
+        maxLength: 120,
+        description: "Optional prefix used when attaching committed animations.",
+      },
+      animationName: {
+        type: "string",
+        minLength: 1,
+        maxLength: 120,
+        description: "Committed animation name to pose.",
+      },
+      normalizedTime: {
+        type: "number",
+        minimum: 0,
+        maximum: 1,
+        description: "Normalized pose time used by poseCommittedAnimation.",
+      },
+      includeDescendants: { type: "boolean" },
+      maxDepth: { type: "integer", minimum: 0, maximum: 30 },
+      rig: { type: "string", description: "Rig path returned by scene inspection." },
+      animation: {
+        type: "string",
+        description: "Animation or KeyframeSequence path returned by animation listing.",
+      },
+      animations: {
+        type: "array",
+        items: { type: "string" },
+        description: "Animation paths to compare.",
+      },
+      page: { type: "integer", minimum: 1 },
+      pageSize: { type: "integer", minimum: 1, maximum: 200 },
+    },
+    additionalProperties: true,
+  };
+}
+
 function tokenHash(token: string): Buffer {
   return createHash("sha256").update(token).digest();
 }
@@ -630,7 +839,7 @@ export class MotionDirectorWebRelay {
       openapi: "3.1.0",
       info: {
         title: "Motion Director for Roblox Studio",
-        version: "0.3.0",
+        version: "0.3.1",
         description:
           "Pairs a ChatGPT conversation with a user's open Roblox Studio and executes bounded animation-authoring operations.",
       },
@@ -671,11 +880,7 @@ export class MotionDirectorWebRelay {
                     properties: {
                       pairingCode: pairingSchema,
                       action: { type: "string", enum: actionNames },
-                      input: {
-                        type: "object",
-                        additionalProperties: true,
-                        description: "Parameters for the selected bounded action.",
-                      },
+                      input: actionInputOpenApiSchema(),
                       confirmWrite: {
                         type: "boolean",
                         default: false,
