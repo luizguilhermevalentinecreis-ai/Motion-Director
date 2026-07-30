@@ -13,7 +13,8 @@ test("exposes the animation analyzer through plugin and MCP commands", async () 
     readFile(serverPath, "utf8"),
   ]);
 
-  assert.match(plugin, /animationAnalyzerVersion = 1/);
+  assert.match(plugin, /parentSpaceBakerVersion = 7/);
+  assert.match(plugin, /animationAnalyzerVersion = 2/);
   assert.match(plugin, /analysis\.listAnimations/);
   assert.match(plugin, /analysis\.inspectAnimation/);
   assert.match(plugin, /analysis\.compareAnimations/);
@@ -33,9 +34,15 @@ test("exposes the animation analyzer through plugin and MCP commands", async () 
 test("keeps analyzer payloads paginated and limb reconstruction rig-aware", async () => {
   const analyzer = await readFile(analyzerPath, "utf8");
 
-  assert.match(analyzer, /rawCount or 30/);
-  assert.match(analyzer, /sampleCount or 30/);
+  assert.match(analyzer, /params\.pageSize or 1/);
+  assert.match(analyzer, /rawCount or pageSize/);
+  assert.match(analyzer, /sampleCount or pageSize/);
+  assert.match(analyzer, /motion-director-animation-analysis-v2/);
+  assert.match(analyzer, /Spatial samples require a selected rig or rigPath/);
   assert.match(analyzer, /math\.clamp\(params\.sampleRate or 60, 1, 120\)/);
-  assert.match(analyzer, /parentFrame \* motor\.C0 \* sampled \* motor\.C1:Inverse\(\)/);
+  assert.match(analyzer, /descendant:IsA\("AnimationConstraint"\)/);
+  assert.match(analyzer, /jointSystem = jointSystem/);
+  assert.match(analyzer, /animationConstraints = animationConstraints/);
+  assert.match(analyzer, /parentFrame \* joint\.C0 \* sampled \* joint\.C1:Inverse\(\)/);
   assert.match(analyzer, /maximumPoseTranslationByJoint/);
 });

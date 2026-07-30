@@ -18,7 +18,7 @@ const bridge = new StudioBridge(
 
 const server = new McpServer({
   name: "roblox-motion-director",
-  version: "0.4.0",
+  version: "0.4.1",
 });
 
 server.registerResource(

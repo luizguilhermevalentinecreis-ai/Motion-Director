@@ -27,9 +27,10 @@ test("pairs a GPT action with a Studio plugin and returns an async result", asyn
   try {
     const connectResponse = await post(baseUrl, "/plugin/connect", {
       installationId: "test-installation",
+      launchId: "test-launch",
       placeId: 123,
       placeName: "Relay test place",
-      pluginVersion: "0.3.0",
+      pluginVersion: "0.4.1",
     });
     assert.equal(connectResponse.status, 200);
     const connection = (await connectResponse.json()) as {
@@ -89,6 +90,69 @@ test("pairs a GPT action with a Studio plugin and returns an async result", asyn
   }
 });
 
+test("translates inspectAnimation pages into bounded plugin sections", async () => {
+  const port = randomPort();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const relay = new MotionDirectorWebRelay({
+    host: "127.0.0.1",
+    port,
+    publicBaseUrl: baseUrl,
+    sessionTtlMs: 10_000,
+  });
+  await relay.start();
+  try {
+    const connectResponse = await post(baseUrl, "/plugin/connect", {
+      installationId: "pagination-test-installation",
+      launchId: "pagination-test-launch",
+      pairingCode: "PAGES-23456",
+      placeName: "Pagination test",
+    });
+    const connection = (await connectResponse.json()) as {
+      sessionId: string;
+      agentToken: string;
+      pairingCode: string;
+    };
+
+    const executeResponse = await post(baseUrl, "/v1/actions/execute", {
+      pairingCode: connection.pairingCode,
+      action: "inspectAnimation",
+      input: {
+        sourcePath: "ServerStorage.RBX_ANIMSAVES.kj anims.Ravage Start",
+        section: "raw",
+        page: 3,
+        pageSize: 1,
+      },
+    });
+    assert.equal(executeResponse.status, 202);
+
+    const pollResponse = await post(baseUrl, "/plugin/poll", {
+      sessionId: connection.sessionId,
+      agentToken: connection.agentToken,
+    });
+    assert.equal(pollResponse.status, 200);
+    const polled = (await pollResponse.json()) as {
+      command: { method: string; params: Record<string, unknown> };
+    };
+    assert.equal(polled.command.method, "analysis.inspectAnimation");
+    assert.deepEqual(polled.command.params, {
+      sourcePath: "ServerStorage.RBX_ANIMSAVES.kj anims.Ravage Start",
+      page: 3,
+      pageSize: 1,
+      rawStart: 2,
+      rawCount: 1,
+      sampleStart: 2,
+      sampleCount: 1,
+      sampleRate: 60,
+      includeRig: false,
+      includeRaw: true,
+      includeSamples: false,
+      includeMetrics: false,
+    });
+  } finally {
+    await relay.stop();
+  }
+});
+
 test("requires confirmation for writes and rejects forged plugin tokens", async () => {
   const port = randomPort();
   const baseUrl = `http://127.0.0.1:${port}`;
@@ -102,6 +166,7 @@ test("requires confirmation for writes and rejects forged plugin tokens", async 
   try {
     const connectResponse = await post(baseUrl, "/plugin/connect", {
       installationId: "security-test-installation",
+      launchId: "security-test-launch",
       placeName: "Security test",
     });
     const connection = (await connectResponse.json()) as {
@@ -130,6 +195,107 @@ test("requires confirmation for writes and rejects forged plugin tokens", async 
   }
 });
 
+test("keeps a user's connection code stable across reconnects and plugin launches", async () => {
+  const port = randomPort();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const relay = new MotionDirectorWebRelay({
+    host: "127.0.0.1",
+    port,
+    publicBaseUrl: baseUrl,
+    sessionTtlMs: 10_000,
+  });
+  await relay.start();
+  try {
+    const firstResponse = await post(baseUrl, "/plugin/connect", {
+      installationId: "stable-code-installation",
+      launchId: "same-plugin-launch",
+      pairingCode: "ABCDE-FGHJK",
+      placeName: "Reconnect test",
+    });
+    const first = (await firstResponse.json()) as {
+      sessionId: string;
+      agentToken: string;
+      pairingCode: string;
+    };
+
+    const reconnectResponse = await post(baseUrl, "/plugin/connect", {
+      installationId: "stable-code-installation",
+      launchId: "same-plugin-launch",
+      pairingCode: "ABCDE-FGHJK",
+      placeName: "Reconnect test",
+    });
+    const reconnect = (await reconnectResponse.json()) as {
+      sessionId: string;
+      agentToken: string;
+      pairingCode: string;
+    };
+
+    assert.equal(reconnect.sessionId, first.sessionId);
+    assert.equal(reconnect.pairingCode, first.pairingCode);
+    assert.notEqual(reconnect.agentToken, first.agentToken);
+
+    const oldTokenPoll = await post(baseUrl, "/plugin/poll", {
+      sessionId: first.sessionId,
+      agentToken: first.agentToken,
+    });
+    assert.equal(oldTokenPoll.status, 401);
+
+    const newTokenPoll = await post(baseUrl, "/plugin/poll", {
+      sessionId: reconnect.sessionId,
+      agentToken: reconnect.agentToken,
+    });
+    assert.equal(newTokenPoll.status, 200);
+
+    const reopenedResponse = await post(baseUrl, "/plugin/connect", {
+      installationId: "stable-code-installation",
+      launchId: "new-plugin-launch",
+      pairingCode: "ABCDE-FGHJK",
+      placeName: "Reconnect test",
+    });
+    const reopened = (await reopenedResponse.json()) as {
+      sessionId: string;
+      pairingCode: string;
+    };
+    assert.notEqual(reopened.sessionId, first.sessionId);
+    assert.equal(reopened.pairingCode, first.pairingCode);
+  } finally {
+    await relay.stop();
+  }
+});
+
+test("restores the user's connection code after the relay expires its session", async () => {
+  const port = randomPort();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const relay = new MotionDirectorWebRelay({
+    host: "127.0.0.1",
+    port,
+    publicBaseUrl: baseUrl,
+    sessionTtlMs: 25,
+  });
+  await relay.start();
+  try {
+    const connectionBody = {
+      installationId: "expired-session-installation",
+      launchId: "persistent-plugin-launch",
+      pairingCode: "23456-789AB",
+      placeName: "Expiration test",
+    };
+    const firstResponse = await post(baseUrl, "/plugin/connect", connectionBody);
+    const first = (await firstResponse.json()) as { pairingCode: string };
+    assert.equal(first.pairingCode, connectionBody.pairingCode);
+
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    const healthResponse = await fetch(`${baseUrl}/health`);
+    assert.equal(healthResponse.status, 200);
+
+    const reconnectResponse = await post(baseUrl, "/plugin/connect", connectionBody);
+    const reconnect = (await reconnectResponse.json()) as { pairingCode: string };
+    assert.equal(reconnect.pairingCode, first.pairingCode);
+  } finally {
+    await relay.stop();
+  }
+});
+
 test("serves a GPT-compatible OpenAPI document and privacy policy", async () => {
   const port = randomPort();
   const baseUrl = `http://127.0.0.1:${port}`;
@@ -144,12 +310,48 @@ test("serves a GPT-compatible OpenAPI document and privacy policy", async () => 
     assert.equal(openApiResponse.status, 200);
     const document = (await openApiResponse.json()) as {
       openapi: string;
+      info: { version: string };
       servers: Array<{ url: string }>;
-      paths: Record<string, unknown>;
+      paths: Record<
+        string,
+        {
+          post?: {
+            requestBody?: {
+              content?: {
+                "application/json"?: {
+                  schema?: {
+                    properties?: {
+                      input?: {
+                        properties?: Record<string, unknown>;
+                      };
+                    };
+                  };
+                };
+              };
+            };
+          };
+        }
+      >;
     };
     assert.equal(document.openapi, "3.1.0");
+    assert.equal(document.info.version, "0.4.1");
     assert.equal(document.servers[0]?.url, baseUrl);
     assert.ok(document.paths["/v1/actions/execute"]);
+    const actionInput =
+      document.paths["/v1/actions/execute"]?.post?.requestBody?.content?.["application/json"]
+        ?.schema?.properties?.input?.properties;
+    assert.ok(actionInput?.transactionName);
+    assert.ok(actionInput?.draft);
+    assert.ok(actionInput?.sourcePath);
+    assert.ok(actionInput?.section);
+    assert.ok(actionInput?.rawCount);
+    assert.ok(
+      (
+        actionInput?.draft as {
+          properties?: { tracks?: { items?: { properties?: Record<string, unknown> } } };
+        }
+      )?.properties?.tracks?.items?.properties?.keys,
+    );
 
     const privacyResponse = await fetch(`${baseUrl}/privacy`);
     assert.equal(privacyResponse.status, 200);

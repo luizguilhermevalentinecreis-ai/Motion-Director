@@ -280,7 +280,25 @@ function actionInputOpenApiSchema(): JsonObject {
         type: "string",
         minLength: 1,
         maxLength: 120,
-        description: "Committed animation name to pose.",
+        description:
+          "Animation name used by inspection or the committed animation name used by posing.",
+      },
+      sourcePath: {
+        type: "string",
+        description:
+          "Exact KeyframeSequence path returned by listAnimations. Prefer this when names are duplicated.",
+      },
+      occurrence: { type: "integer", minimum: 1 },
+      rigPath: {
+        type: "string",
+        description: "Rig Model path required only for spatial samples, metrics, or rig topology.",
+      },
+      section: {
+        type: "string",
+        enum: ["raw", "samples", "metrics", "rig", "all"],
+        default: "raw",
+        description:
+          "Bounded inspectAnimation response section. Use raw for exact Pose transforms without requiring a selected rig.",
       },
       normalizedTime: {
         type: "number",
@@ -301,7 +319,29 @@ function actionInputOpenApiSchema(): JsonObject {
         description: "Animation paths to compare.",
       },
       page: { type: "integer", minimum: 1 },
-      pageSize: { type: "integer", minimum: 1, maximum: 200 },
+      pageSize: {
+        type: "integer",
+        minimum: 1,
+        maximum: 10,
+        default: 1,
+        description: "Real page size for raw keyframes or sampled frames.",
+      },
+      rawStart: { type: "integer", minimum: 0 },
+      rawCount: { type: "integer", minimum: 0, maximum: 10 },
+      sampleStart: { type: "integer", minimum: 0 },
+      sampleCount: { type: "integer", minimum: 0, maximum: 10 },
+      sampleRate: { type: "number", minimum: 1, maximum: 120 },
+      includeRig: { type: "boolean" },
+      includeRaw: { type: "boolean" },
+      includeSamples: { type: "boolean" },
+      includeMetrics: { type: "boolean" },
+      parts: {
+        type: "array",
+        maxItems: 24,
+        items: { type: "string" },
+        description:
+          "Optional animated part names to limit sampled and raw Pose transforms.",
+      },
     },
     additionalProperties: true,
   };
@@ -649,6 +689,109 @@ export class MotionDirectorWebRelay {
   }
 
   private validateActionInput(action: RelayActionName, input: JsonObject): JsonObject {
+    if (action === "inspectAnimation") {
+      const page = Math.max(1, Math.trunc(Number(input.page) || 1));
+      const pageSize = Math.min(10, Math.max(1, Math.trunc(Number(input.pageSize) || 1)));
+      const rawStart = Math.max(
+        0,
+        Math.trunc(
+          input.rawStart === undefined ? (page - 1) * pageSize : Number(input.rawStart) || 0,
+        ),
+      );
+      const sampleStart = Math.max(
+        0,
+        Math.trunc(
+          input.sampleStart === undefined
+            ? (page - 1) * pageSize
+            : Number(input.sampleStart) || 0,
+        ),
+      );
+      const rawCount = Math.min(
+        10,
+        Math.max(
+          0,
+          Math.trunc(input.rawCount === undefined ? pageSize : Number(input.rawCount) || 0),
+        ),
+      );
+      const sampleCount = Math.min(
+        10,
+        Math.max(
+          0,
+          Math.trunc(input.sampleCount === undefined ? pageSize : Number(input.sampleCount) || 0),
+        ),
+      );
+      const requestedSection =
+        typeof input.section === "string" ? input.section : "raw";
+      const section = ["raw", "samples", "metrics", "rig", "all"].includes(requestedSection)
+        ? requestedSection
+        : "raw";
+      const parts = Array.isArray(input.parts)
+        ? input.parts
+            .filter((value): value is string => typeof value === "string" && value.length > 0)
+            .slice(0, 24)
+        : undefined;
+      const params: JsonObject = {
+        ...(typeof input.sourcePath === "string" ? { sourcePath: input.sourcePath } : {}),
+        ...(typeof input.animationName === "string"
+          ? { animationName: input.animationName }
+          : {}),
+        ...(Number.isFinite(Number(input.occurrence))
+          ? { occurrence: Math.max(1, Math.trunc(Number(input.occurrence))) }
+          : {}),
+        ...(typeof input.rigPath === "string" ? { rigPath: input.rigPath } : {}),
+        page,
+        pageSize,
+        rawStart,
+        rawCount,
+        sampleStart,
+        sampleCount,
+        sampleRate: Math.min(120, Math.max(1, Number(input.sampleRate) || 60)),
+        ...(parts ? { parts } : {}),
+      };
+      if (section === "raw") {
+        return {
+          ...params,
+          includeRig: false,
+          includeRaw: true,
+          includeSamples: false,
+          includeMetrics: false,
+        };
+      }
+      if (section === "samples") {
+        return {
+          ...params,
+          includeRig: false,
+          includeRaw: false,
+          includeSamples: true,
+          includeMetrics: false,
+        };
+      }
+      if (section === "metrics") {
+        return {
+          ...params,
+          includeRig: false,
+          includeRaw: false,
+          includeSamples: false,
+          includeMetrics: true,
+        };
+      }
+      if (section === "rig") {
+        return {
+          ...params,
+          includeRig: true,
+          includeRaw: false,
+          includeSamples: false,
+          includeMetrics: false,
+        };
+      }
+      return {
+        ...params,
+        includeRig: input.includeRig !== false,
+        includeRaw: input.includeRaw !== false,
+        includeSamples: input.includeSamples !== false,
+        includeMetrics: input.includeMetrics !== false,
+      };
+    }
     if (action === "stageAnimationDraft") {
       const transactionName = this.requiredString(input.transactionName, "transactionName", 120);
       const draft = animationDraftSchema.parse(input.draft);
@@ -840,7 +983,7 @@ export class MotionDirectorWebRelay {
       openapi: "3.1.0",
       info: {
         title: "Motion Director for Roblox Studio",
-        version: "0.4.0",
+        version: "0.4.1",
         description:
           "Pairs a ChatGPT conversation with a user's open Roblox Studio and executes bounded animation-authoring operations.",
       },

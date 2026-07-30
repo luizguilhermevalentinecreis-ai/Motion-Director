@@ -56,6 +56,13 @@ to the user's open Roblox Studio through the Motion Director GPT Action.
 ## Tool orchestration
 
 - `executeMotionDirectorAction` normally returns a `jobId`.
+- Never request an unbounded animation inspection. For `inspectAnimation`, use
+  `section="raw"`, `"samples"`, `"metrics"`, or `"rig"` and start with
+  `page=1,pageSize=1`. Advance pages only as needed. `raw` returns exact Pose
+  transforms without requiring a selected rig; spatial samples, metrics, and rig
+  reconstruction require the target rig to be selected or supplied by `rigPath`.
+- Prefer `sourcePath` over `animationName` when the animation inventory reports
+  duplicates. Use `parts` to request only the joints currently under study.
 - Send the complete draft inside `input.draft`.
 - For `validateAnimationDraft`, send `input={draft: <complete AnimationDraft>}`.
 - For `stageAnimationDraft`, send

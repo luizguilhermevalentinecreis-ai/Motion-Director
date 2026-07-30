@@ -14,6 +14,16 @@ test("plugin persists human-review provenance on baked sequences", async () => {
   assert.match(source, /MotionDirectorStyles/);
 });
 
+test("plugin inspects and bakes both legacy and upgraded R15 animation joints", async () => {
+  const source = await readFile(pluginSourceUrl, "utf8");
+  assert.match(source, /descendant:IsA\("Motor6D"\) or descendant:IsA\("AnimationConstraint"\)/);
+  assert.match(source, /avatarJointUpgrade = #animationConstraints > 0/);
+  assert.match(source, /trackName = descendant\.Part1 and descendant\.Part1\.Name/);
+  assert.match(source, /attachment0 = descendant\.Attachment0/);
+  assert.match(source, /parentSpaceBakerVersion = 7/);
+  assert.match(source, /animationAnalyzerVersion = 2/);
+});
+
 test("single-rig commits remove every duplicate destination name deterministically", async () => {
   const source = await readFile(pluginSourceUrl, "utf8");
   const commitHandler = source.slice(
