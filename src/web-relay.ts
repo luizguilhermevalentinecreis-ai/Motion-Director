@@ -60,6 +60,7 @@ interface RelayCommand {
 interface PluginSession {
   id: string;
   installationId: string;
+  launchId: string;
   tokenHash: Buffer;
   pairingCode: string;
   studioUserId?: number;
@@ -225,14 +226,27 @@ export class MotionDirectorWebRelay {
   private async pluginConnect(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const body = await this.readJson(request);
     const installationId = this.requiredString(body.installationId, "installationId", 160);
+    const launchId =
+      typeof body.launchId === "string" && body.launchId.trim() !== ""
+        ? body.launchId.trim().slice(0, 160)
+        : `legacy:${installationId}`;
     const oldId = this.sessionByInstallation.get(installationId);
+    const token = randomBytes(32).toString("base64url");
+    const oldSession = oldId ? this.sessions.get(oldId) : undefined;
+    if (oldSession?.launchId === launchId) {
+      oldSession.tokenHash = tokenHash(token);
+      oldSession.lastSeenAt = Date.now();
+      Object.assign(oldSession, this.optionalSessionMetadata(body));
+      this.pluginConnectionResponse(response, oldSession, token);
+      return;
+    }
     if (oldId) this.removeSession(oldId);
 
-    const token = randomBytes(32).toString("base64url");
     const code = pairingCode();
     const session: PluginSession = {
       id: randomUUID(),
       installationId,
+      launchId,
       tokenHash: tokenHash(token),
       pairingCode: code,
       ...this.optionalSessionMetadata(body),
@@ -243,10 +257,18 @@ export class MotionDirectorWebRelay {
     this.sessions.set(session.id, session);
     this.sessionByInstallation.set(installationId, session.id);
     this.sessionByPairingCode.set(code, session.id);
+    this.pluginConnectionResponse(response, session, token);
+  }
+
+  private pluginConnectionResponse(
+    response: ServerResponse,
+    session: PluginSession,
+    token: string,
+  ): void {
     this.json(response, 200, {
       sessionId: session.id,
       agentToken: token,
-      pairingCode: code,
+      pairingCode: session.pairingCode,
       pollIntervalMs: 500,
       expiresWithoutHeartbeatMs: this.sessionTtlMs,
     });
