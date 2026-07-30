@@ -18,7 +18,7 @@ const bridge = new StudioBridge(
 
 const server = new McpServer({
   name: "roblox-motion-director",
-  version: "0.3.0",
+  version: "0.4.0",
 });
 
 server.registerResource(
@@ -155,7 +155,7 @@ server.registerTool(
   {
     title: "Get the live Studio animation baker capabilities",
     description:
-      "Returns the exact baker and preview feature level of the plugin instance that will execute commands. Require parentSpaceBakerVersion >= 2 for anatomical R6/R15 tracks.",
+      "Returns the exact baker and preview feature level of the plugin instance that will execute commands. Require parentSpaceBakerVersion >= 7 and animationAnalyzerVersion >= 2 for dual Motor6D/AnimationConstraint R15 support.",
     inputSchema: {},
   },
   async () => {
@@ -192,7 +192,7 @@ server.registerTool(
   {
     title: "Inspect an animation rig",
     description:
-      "Builds a canonical animation-rig description from a selected Model, including Motor6D joints, bones, rest transforms, hierarchy, effectors, and warnings.",
+      "Builds a canonical animation-rig description from a selected Model, including Motor6D, AnimationConstraint, Bone topology, attachment bases, track names, hierarchy, effectors, and warnings.",
     inputSchema: {
       rigId: z.string().optional().describe("Stable instance id. Omit to inspect the selected rig."),
       includeGeometryBounds: z.boolean().default(true),
@@ -233,7 +233,7 @@ server.registerTool(
   {
     title: "Inspect a complete animation as machine-readable motion data",
     description:
-      "Exports a lossless, paginated KeyframeSequence view plus the target rig, Motor6D bases, interpolated root-relative spatial samples, center of mass, support feet, velocities, angular velocities, path lengths, pose translation, and support travel. True world foot sliding requires root motion or gameplay displacement. Provide sourcePath from list_analyzable_animations whenever duplicate names exist.",
+      "Exports a lossless, paginated KeyframeSequence view plus the target rig, Motor6D or AnimationConstraint bases, interpolated root-relative spatial samples, center of mass, support feet, velocities, angular velocities, path lengths, pose translation, and support travel. True world foot sliding requires root motion or gameplay displacement. Provide sourcePath from list_analyzable_animations whenever duplicate names exist.",
     inputSchema: {
       sourcePath: z.string().min(1).max(500).optional(),
       animationName: z.string().min(1).max(160).optional(),
@@ -659,7 +659,7 @@ server.registerTool(
   {
     title: "Rebuild a calibrated R15 parkour suite",
     description:
-      "Rebuilds the parkour suite from official R15 reference clips using direct Pose/AnimationConstraint Transform space, conservative joint-local offsets, and in-place root motion.",
+      "Rebuilds the parkour suite from official R15 reference clips using direct Pose space compatible with both Motor6D.Transform and AnimationConstraint.Transform, conservative joint-local offsets, and in-place root motion.",
     inputSchema: {},
   },
   async () => {

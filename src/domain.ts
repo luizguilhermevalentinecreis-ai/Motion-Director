@@ -45,7 +45,7 @@ export const jointTrackSchema = z.object({
     .enum(["local", "motor", "parent", "character", "world"])
     .default("motor")
     .describe(
-      "motor/local is raw Motor6D.Transform space; parent is anatomical Part0 space; character/world require hierarchical solving.",
+      "motor/local is raw Motor6D.Transform or AnimationConstraint.Transform space; parent is anatomical Part0 space; character/world require hierarchical solving.",
     ),
   keys: z.array(poseKeySchema).min(1),
 });

@@ -14,10 +14,10 @@ export interface RigAuthoringProfile {
 }
 
 const sharedPrinciples = [
-  "Author anatomical rotations in parent-part space, never assumed Motor6D axes.",
+  "Author anatomical rotations in parent-part space, never assumed Motor6D or AnimationConstraint axes.",
   "Establish support, root motion, and torso intent before posing extremities.",
   "Use world-space contacts as constraints, then solve them back into the joint hierarchy.",
-  "Inspect C0 and C1 from the actual rig; names alone do not define an axis basis.",
+  "Inspect the actual joint system and its C0/C1 or Attachment0/Attachment1 bases; names alone do not define an axis basis.",
 ];
 
 export const R6_PROFILE: RigAuthoringProfile = {
@@ -90,6 +90,9 @@ export const R15_PROFILE: RigAuthoringProfile = {
   ],
   principles: [
     ...sharedPrinciples,
+    "Detect whether this R15 uses Avatar Joint Upgrade AnimationConstraints, legacy Motor6Ds, or a hybrid before authoring any track.",
+    "For AnimationConstraint R15, use each constraint's Part1 as the Pose track name and read the attachment-derived C0/C1 aliases without modifying RigAttachment CFrames.",
+    "AnimationConstraint.Transform and Motor6D.Transform share the same authored local offset semantics, but force-driven constraints may visibly lag when IsKinematic is false.",
     "Distribute action through the chain. Avoid placing an entire reach or strike in one shoulder or hip.",
     "Solve hands and feet as effectors while preserving elbow and knee pole directions.",
     "Split torso twist between LowerTorso and UpperTorso, normally weighting the lower segment more for force.",
@@ -163,7 +166,7 @@ export function profileForRigType(rigType: unknown): RigAuthoringProfile {
     topology: [],
     principles: [
       ...sharedPrinciples,
-      "Infer chains from Motor6D/Bone hierarchy and require explicit anatomical axis calibration.",
+      "Infer chains from Motor6D, AnimationConstraint, or Bone hierarchy and require explicit anatomical axis calibration.",
     ],
     jointGuidance: {},
   };

@@ -160,7 +160,8 @@ function animationDraftOpenApiSchema(): JsonObject {
       joint: {
         type: "string",
         minLength: 1,
-        description: "Exact joint or Motor6D name reported by inspectRig.",
+        description:
+          "Exact animated child-part or Bone trackName reported by inspectRig; do not substitute the constraint object name.",
       },
       space: {
         type: "string",
@@ -839,7 +840,7 @@ export class MotionDirectorWebRelay {
       openapi: "3.1.0",
       info: {
         title: "Motion Director for Roblox Studio",
-        version: "0.3.1",
+        version: "0.4.0",
         description:
           "Pairs a ChatGPT conversation with a user's open Roblox Studio and executes bounded animation-authoring operations.",
       },

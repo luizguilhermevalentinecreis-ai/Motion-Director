@@ -124,7 +124,11 @@ export const ANIMATION_CONTRACT_GUIDE = `# Animation draft contract guide v1
 - staging creates a reversible transaction;
 - committing requires the staged transaction id.
 
-The current implementation exports Motor6D-oriented KeyframeSequence drafts.
+The current implementation exports KeyframeSequence drafts compatible with legacy
+Motor6D rigs and Avatar Joint Upgrade AnimationConstraint rigs. Pose tracks target
+the reported animated child part name, and parent-space rotations are mapped through
+the actual joint basis. Bone-only skinned rigs remain a separate topology that must
+use their reported Bone tracks.
 Curve tangents are preserved by the canonical schema for the future curve and
 solver pipeline, but the v1 Roblox bake uses Pose easing.
 `;

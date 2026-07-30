@@ -46,12 +46,12 @@ export function reviewDraft(draft: AnimationDraft): QualityReport {
       explanation:
         safeSpaceScore === 1
           ? worldSpaceJointSolved
-            ? `All ${rigType} tracks use parent-space motion or explicitly world-solved Motor6D transforms.`
+            ? `All ${rigType} tracks use parent-space motion or explicitly world-solved animation-joint transforms.`
             : `All ${rigType} tracks use parent-space anatomical rotations.`
           : `${draft.tracks.length - parentSpaceTracks.length} tracks bypass anatomical ${rigType} axis conversion.`,
       suggestedAction:
         safeSpaceScore < 1
-          ? `Author ${rigType} motion in parent space and let Motion Director map through each Motor6D C0 basis.`
+          ? `Author ${rigType} motion in parent space and let Motion Director map through each Motor6D or AnimationConstraint joint basis.`
           : undefined,
     });
 
