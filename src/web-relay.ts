@@ -140,7 +140,7 @@ export class MotionDirectorWebRelay {
     this.host = options.host ?? "0.0.0.0";
     this.port = options.port ?? 34719;
     this.publicBaseUrl = (options.publicBaseUrl ?? `http://127.0.0.1:${this.port}`).replace(/\/+$/, "");
-    this.sessionTtlMs = options.sessionTtlMs ?? 15_000;
+    this.sessionTtlMs = options.sessionTtlMs ?? 5 * 60_000;
     this.jobTtlMs = options.jobTtlMs ?? 15 * 60_000;
     this.maxPendingJobsPerSession = options.maxPendingJobsPerSession ?? 8;
   }
@@ -230,6 +230,7 @@ export class MotionDirectorWebRelay {
       typeof body.launchId === "string" && body.launchId.trim() !== ""
         ? body.launchId.trim().slice(0, 160)
         : `legacy:${installationId}`;
+    const requestedPairingCode = normalizePairingCode(body.pairingCode);
     const oldId = this.sessionByInstallation.get(installationId);
     const token = randomBytes(32).toString("base64url");
     const oldSession = oldId ? this.sessions.get(oldId) : undefined;
@@ -242,7 +243,10 @@ export class MotionDirectorWebRelay {
     }
     if (oldId) this.removeSession(oldId);
 
-    const code = pairingCode();
+    const code =
+      requestedPairingCode && !this.sessionByPairingCode.has(requestedPairingCode)
+        ? requestedPairingCode
+        : pairingCode();
     const session: PluginSession = {
       id: randomUUID(),
       installationId,
@@ -619,7 +623,8 @@ export class MotionDirectorWebRelay {
     const pairingSchema = {
       type: "string",
       pattern: "^[A-Z2-9]{5}-[A-Z2-9]{5}$",
-      description: "Temporary pairing code shown by the Motion Director Roblox Studio plugin.",
+      description:
+        "Persistent personal connection code shown by the Motion Director Roblox Studio plugin.",
     };
     return {
       openapi: "3.1.0",
@@ -721,11 +726,11 @@ export class MotionDirectorWebRelay {
 <title>Motion Director Privacy Policy</title></head><body>
 <main><h1>Motion Director Privacy Policy</h1>
 <p>Motion Director relays commands between ChatGPT and the Roblox Studio session that a user explicitly pairs.</p>
-<h2>Data processed</h2><p>Temporary pairing codes, plugin version, place identifier and name, animation drafts, selected rig metadata, command results, and operational timestamps.</p>
+<h2>Data processed</h2><p>Personal connection codes, plugin version, place identifier and name, animation drafts, selected rig metadata, command results, and operational timestamps.</p>
 <h2>Purpose</h2><p>Data is used only to route requested animation operations, return results, prevent abuse, and diagnose failures.</p>
 <h2>Retention</h2><p>Pairing sessions and command jobs are temporary and expire automatically. Production deployments must configure infrastructure logs with the shortest practical retention.</p>
 <h2>Sharing</h2><p>Motion Director does not sell personal data. Data is sent only to the paired Roblox Studio session and infrastructure providers required to operate the relay.</p>
-<h2>User control</h2><p>Closing Studio, disabling remote mode, or regenerating the pairing code ends access. Users can discard staged animations before commit.</p>
+<h2>User control</h2><p>Closing Studio or disabling remote mode makes the connected Studio unavailable. Users can discard staged animations before commit.</p>
 <h2>Security</h2><p>The relay exposes a fixed allowlist of animation operations and does not provide arbitrary Luau or filesystem execution.</p>
 <p>Contact: replace-this-address-before-publication@example.com</p></main></body></html>`;
   }
