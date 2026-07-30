@@ -1,0 +1,29 @@
+{
+  "name": "roblox-motion-director",
+  "version": "0.3.0",
+  "private": true,
+  "description": "Local-first MCP animation direction system for Roblox Studio",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/index.ts",
+    "relay:dev": "tsx src/web-relay-main.ts",
+    "start": "node dist/index.js",
+    "relay:start": "node dist/src/web-relay-main.js",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test --import tsx test/**/*.test.ts",
+    "smoke:mcp": "tsx scripts/smoke-mcp.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "7.0.2"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

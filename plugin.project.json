@@ -1,0 +1,12 @@
+{
+  "name": "RobloxMotionDirectorPlugin",
+  "tree": {
+    "$className": "Folder",
+    "AnimationAnalyzer": {
+      "$path": "studio-plugin/AnimationAnalyzer.lua"
+    },
+    "MotionDirectorPlugin": {
+      "$path": "studio-plugin/MotionDirectorPlugin.server.lua"
+    }
+  }
+}

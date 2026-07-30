@@ -1,0 +1,710 @@
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { animationDraftSchema, validateTemporalIntegrity } from "./domain.js";
+import { reviewDraft } from "./quality.js";
+
+type JsonObject = Record<string, unknown>;
+
+export type RelayActionName =
+  | "getAnimationCapabilities"
+  | "getSceneSelection"
+  | "inspectRig"
+  | "listAnimations"
+  | "inspectAnimation"
+  | "compareAnimations"
+  | "validateAnimationDraft"
+  | "stageAnimationDraft"
+  | "commitAnimationDraft"
+  | "discardAnimationDraft"
+  | "attachCommittedAnimations"
+  | "poseCommittedAnimation"
+  | "resetRigPose";
+
+interface ActionDefinition {
+  method?: string;
+  write: boolean;
+  timeoutMs: number;
+}
+
+const ACTIONS: Record<RelayActionName, ActionDefinition> = {
+  getAnimationCapabilities: { method: "system.capabilities", write: false, timeoutMs: 10_000 },
+  getSceneSelection: { method: "scene.getSelection", write: false, timeoutMs: 30_000 },
+  inspectRig: { method: "rig.inspect", write: false, timeoutMs: 30_000 },
+  listAnimations: { method: "analysis.listAnimations", write: false, timeoutMs: 120_000 },
+  inspectAnimation: { method: "analysis.inspectAnimation", write: false, timeoutMs: 180_000 },
+  compareAnimations: { method: "analysis.compareAnimations", write: false, timeoutMs: 180_000 },
+  validateAnimationDraft: { write: false, timeoutMs: 10_000 },
+  stageAnimationDraft: { method: "animation.stageDraft", write: true, timeoutMs: 120_000 },
+  commitAnimationDraft: { method: "animation.commitDraft", write: true, timeoutMs: 120_000 },
+  discardAnimationDraft: { method: "animation.discardDraft", write: true, timeoutMs: 30_000 },
+  attachCommittedAnimations: {
+    method: "animation.attachCommittedToAnimSaves",
+    write: true,
+    timeoutMs: 120_000,
+  },
+  poseCommittedAnimation: {
+    method: "animation.poseCommittedAtTime",
+    write: true,
+    timeoutMs: 120_000,
+  },
+  resetRigPose: { method: "animation.resetSelectedRigPose", write: true, timeoutMs: 120_000 },
+};
+
+interface RelayCommand {
+  id: string;
+  method: string;
+  params: JsonObject;
+  createdAt: number;
+}
+
+interface PluginSession {
+  id: string;
+  installationId: string;
+  tokenHash: Buffer;
+  pairingCode: string;
+  studioUserId?: number;
+  placeId?: number;
+  placeName?: string;
+  pluginVersion?: string;
+  connectedAt: number;
+  lastSeenAt: number;
+  queue: RelayCommand[];
+}
+
+interface RelayJob {
+  id: string;
+  sessionId: string;
+  pairingCode: string;
+  action: RelayActionName;
+  status: "queued" | "running" | "succeeded" | "failed";
+  createdAt: number;
+  updatedAt: number;
+  result?: unknown;
+  error?: string;
+  timeout?: NodeJS.Timeout;
+}
+
+export interface WebRelayOptions {
+  host?: string;
+  port?: number;
+  publicBaseUrl?: string;
+  sessionTtlMs?: number;
+  jobTtlMs?: number;
+  maxPendingJobsPerSession?: number;
+}
+
+const PAIRING_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const MAX_BODY_BYTES = 4 * 1024 * 1024;
+
+function tokenHash(token: string): Buffer {
+  return createHash("sha256").update(token).digest();
+}
+
+function secureEqual(left: Buffer, right: Buffer): boolean {
+  return left.byteLength === right.byteLength && timingSafeEqual(left, right);
+}
+
+function pairingCode(): string {
+  const bytes = randomBytes(10);
+  let value = "";
+  for (const byte of bytes) value += PAIRING_ALPHABET[byte! % PAIRING_ALPHABET.length];
+  return `${value.slice(0, 5)}-${value.slice(5)}`;
+}
+
+function isJsonObject(value: unknown): value is JsonObject {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function normalizePairingCode(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toUpperCase();
+  return /^[A-Z2-9]{5}-[A-Z2-9]{5}$/.test(normalized) ? normalized : undefined;
+}
+
+export class MotionDirectorWebRelay {
+  readonly host: string;
+  readonly port: number;
+  readonly publicBaseUrl: string;
+  private readonly sessionTtlMs: number;
+  private readonly jobTtlMs: number;
+  private readonly maxPendingJobsPerSession: number;
+  private server: ReturnType<typeof createServer> | undefined;
+  private readonly sessions = new Map<string, PluginSession>();
+  private readonly sessionByInstallation = new Map<string, string>();
+  private readonly sessionByPairingCode = new Map<string, string>();
+  private readonly jobs = new Map<string, RelayJob>();
+  private readonly jobByCommand = new Map<string, string>();
+
+  constructor(options: WebRelayOptions = {}) {
+    this.host = options.host ?? "0.0.0.0";
+    this.port = options.port ?? 34719;
+    this.publicBaseUrl = (options.publicBaseUrl ?? `http://127.0.0.1:${this.port}`).replace(/\/+$/, "");
+    this.sessionTtlMs = options.sessionTtlMs ?? 15_000;
+    this.jobTtlMs = options.jobTtlMs ?? 15 * 60_000;
+    this.maxPendingJobsPerSession = options.maxPendingJobsPerSession ?? 8;
+  }
+
+  async start(): Promise<void> {
+    if (this.server) return;
+    this.server = createServer((request, response) => void this.route(request, response));
+    await new Promise<void>((resolve, reject) => {
+      this.server!.once("error", reject);
+      this.server!.listen(this.port, this.host, resolve);
+    });
+  }
+
+  async stop(): Promise<void> {
+    for (const job of this.jobs.values()) {
+      if (job.timeout) clearTimeout(job.timeout);
+    }
+    if (!this.server) return;
+    await new Promise<void>((resolve, reject) =>
+      this.server!.close((error) => (error ? reject(error) : resolve())),
+    );
+    this.server = undefined;
+  }
+
+  private async route(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    this.applyHeaders(response);
+    if (request.method === "OPTIONS") {
+      response.writeHead(204);
+      response.end();
+      return;
+    }
+    this.cleanup();
+    const url = new URL(request.url ?? "/", this.publicBaseUrl);
+    try {
+      if (request.method === "GET" && url.pathname === "/health") {
+        this.json(response, 200, {
+          ok: true,
+          service: "motion-director-web-relay",
+          activeStudios: this.activeSessions().length,
+        });
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/openapi.json") {
+        this.json(response, 200, this.openApiDocument());
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/privacy") {
+        this.html(response, 200, this.privacyPolicy());
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/plugin/connect") {
+        await this.pluginConnect(request, response);
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/plugin/poll") {
+        await this.pluginPoll(request, response);
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/plugin/result") {
+        await this.pluginResult(request, response);
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/v1/actions/studio-status") {
+        await this.actionStudioStatus(request, response);
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/v1/actions/execute") {
+        await this.actionExecute(request, response);
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/v1/actions/job") {
+        await this.actionJob(request, response);
+        return;
+      }
+      this.json(response, 404, { error: "Not found." });
+    } catch (error) {
+      this.json(response, 400, {
+        error: error instanceof Error ? error.message : "Invalid request.",
+      });
+    }
+  }
+
+  private async pluginConnect(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const body = await this.readJson(request);
+    const installationId = this.requiredString(body.installationId, "installationId", 160);
+    const oldId = this.sessionByInstallation.get(installationId);
+    if (oldId) this.removeSession(oldId);
+
+    const token = randomBytes(32).toString("base64url");
+    const code = pairingCode();
+    const session: PluginSession = {
+      id: randomUUID(),
+      installationId,
+      tokenHash: tokenHash(token),
+      pairingCode: code,
+      ...this.optionalSessionMetadata(body),
+      connectedAt: Date.now(),
+      lastSeenAt: Date.now(),
+      queue: [],
+    };
+    this.sessions.set(session.id, session);
+    this.sessionByInstallation.set(installationId, session.id);
+    this.sessionByPairingCode.set(code, session.id);
+    this.json(response, 200, {
+      sessionId: session.id,
+      agentToken: token,
+      pairingCode: code,
+      pollIntervalMs: 500,
+      expiresWithoutHeartbeatMs: this.sessionTtlMs,
+    });
+  }
+
+  private async pluginPoll(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const body = await this.readJson(request);
+    const session = this.authenticatePlugin(body);
+    if (!session) {
+      this.json(response, 401, { reconnect: true, error: "Invalid or expired plugin session." });
+      return;
+    }
+    session.lastSeenAt = Date.now();
+    const command = session.queue.shift() ?? null;
+    if (command) {
+      const jobId = this.jobByCommand.get(command.id);
+      const job = jobId ? this.jobs.get(jobId) : undefined;
+      if (job && job.status === "queued") {
+        job.status = "running";
+        job.updatedAt = Date.now();
+      }
+    }
+    this.json(response, 200, { command });
+  }
+
+  private async pluginResult(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const body = await this.readJson(request);
+    const session = this.authenticatePlugin(body);
+    if (!session) {
+      this.json(response, 401, { reconnect: true, error: "Invalid or expired plugin session." });
+      return;
+    }
+    session.lastSeenAt = Date.now();
+    const commandId = this.requiredString(body.id, "id", 100);
+    const jobId = this.jobByCommand.get(commandId);
+    const job = jobId ? this.jobs.get(jobId) : undefined;
+    if (!job || job.sessionId !== session.id) {
+      this.json(response, 404, { error: "Unknown or expired command." });
+      return;
+    }
+    if (job.timeout) clearTimeout(job.timeout);
+    delete job.timeout;
+    job.updatedAt = Date.now();
+    if (body.ok === true) {
+      job.status = "succeeded";
+      job.result = body.result;
+    } else {
+      job.status = "failed";
+      job.error = this.extractPluginError(body.error);
+    }
+    this.jobByCommand.delete(commandId);
+    this.json(response, 200, { accepted: true, jobId: job.id });
+  }
+
+  private async actionStudioStatus(
+    request: IncomingMessage,
+    response: ServerResponse,
+  ): Promise<void> {
+    const body = await this.readJson(request);
+    const code = normalizePairingCode(body.pairingCode);
+    const session = code ? this.sessionForPairingCode(code) : undefined;
+    if (!code || !session) {
+      this.json(response, 404, {
+        connected: false,
+        error: "Pairing code is invalid, expired, or the Studio plugin is offline.",
+      });
+      return;
+    }
+    this.json(response, 200, {
+      connected: true,
+      pairingCode: code,
+      studio: this.publicSession(session),
+      availableActions: Object.keys(ACTIONS),
+    });
+  }
+
+  private async actionExecute(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const body = await this.readJson(request);
+    const code = normalizePairingCode(body.pairingCode);
+    const session = code ? this.sessionForPairingCode(code) : undefined;
+    if (!code || !session) {
+      this.json(response, 404, {
+        error: "Pairing code is invalid, expired, or the Studio plugin is offline.",
+      });
+      return;
+    }
+    const action = this.actionName(body.action);
+    const definition = ACTIONS[action];
+    const input = body.input === undefined ? {} : body.input;
+    if (!isJsonObject(input)) throw new Error("input must be a JSON object.");
+    if (definition.write && body.confirmWrite !== true) {
+      this.json(response, 409, {
+        error: "This action changes the open Roblox place. Ask the user for confirmation, then retry with confirmWrite=true.",
+        action,
+        requiresConfirmation: true,
+      });
+      return;
+    }
+    if (action === "validateAnimationDraft") {
+      const draft = animationDraftSchema.parse(input.draft);
+      this.json(response, 200, {
+        status: "succeeded",
+        action,
+        result: {
+          valid: validateTemporalIntegrity(draft).length === 0,
+          report: reviewDraft(draft),
+        },
+      });
+      return;
+    }
+    const activeJobs = [...this.jobs.values()].filter(
+      (job) =>
+        job.sessionId === session.id && (job.status === "queued" || job.status === "running"),
+    );
+    if (activeJobs.length >= this.maxPendingJobsPerSession) {
+      this.json(response, 429, { error: "Too many pending commands for this Studio session." });
+      return;
+    }
+    const params = this.validateActionInput(action, input);
+    const command: RelayCommand = {
+      id: randomUUID(),
+      method: definition.method!,
+      params,
+      createdAt: Date.now(),
+    };
+    const job: RelayJob = {
+      id: randomUUID(),
+      sessionId: session.id,
+      pairingCode: code,
+      action,
+      status: "queued",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    job.timeout = setTimeout(() => {
+      if (job.status === "queued" || job.status === "running") {
+        job.status = "failed";
+        job.error = `Studio command timed out after ${definition.timeoutMs}ms.`;
+        job.updatedAt = Date.now();
+      }
+      this.jobByCommand.delete(command.id);
+    }, definition.timeoutMs);
+    this.jobs.set(job.id, job);
+    this.jobByCommand.set(command.id, job.id);
+    session.queue.push(command);
+    this.json(response, 202, {
+      jobId: job.id,
+      status: job.status,
+      action,
+      pollAfterMs: 600,
+    });
+  }
+
+  private async actionJob(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const body = await this.readJson(request);
+    const code = normalizePairingCode(body.pairingCode);
+    const jobId = this.requiredString(body.jobId, "jobId", 100);
+    const job = this.jobs.get(jobId);
+    if (!code || !job || job.pairingCode !== code) {
+      this.json(response, 404, { error: "Job not found for this pairing code." });
+      return;
+    }
+    this.json(response, 200, this.publicJob(job));
+  }
+
+  private validateActionInput(action: RelayActionName, input: JsonObject): JsonObject {
+    if (action === "stageAnimationDraft") {
+      const transactionName = this.requiredString(input.transactionName, "transactionName", 120);
+      const draft = animationDraftSchema.parse(input.draft);
+      const problems = validateTemporalIntegrity(draft);
+      if (problems.length > 0) throw new Error(problems.join("\n"));
+      return { transactionName, draft };
+    }
+    if (action === "commitAnimationDraft") {
+      return {
+        transactionId: this.requiredString(input.transactionId, "transactionId", 160),
+        destinationName: this.requiredString(input.destinationName, "destinationName", 120),
+      };
+    }
+    if (action === "discardAnimationDraft") {
+      return { transactionId: this.requiredString(input.transactionId, "transactionId", 160) };
+    }
+    if (action === "attachCommittedAnimations") {
+      return {
+        namePrefix:
+          input.namePrefix === undefined
+            ? ""
+            : this.requiredString(input.namePrefix, "namePrefix", 120),
+      };
+    }
+    if (action === "poseCommittedAnimation") {
+      const normalizedTime = Number(input.normalizedTime);
+      if (!Number.isFinite(normalizedTime) || normalizedTime < 0 || normalizedTime > 1) {
+        throw new Error("normalizedTime must be between 0 and 1.");
+      }
+      return {
+        animationName: this.requiredString(input.animationName, "animationName", 120),
+        normalizedTime,
+      };
+    }
+    if (action === "resetRigPose") return {};
+    return input;
+  }
+
+  private actionName(value: unknown): RelayActionName {
+    if (typeof value !== "string" || !(value in ACTIONS)) {
+      throw new Error(`Unknown action. Allowed actions: ${Object.keys(ACTIONS).join(", ")}.`);
+    }
+    return value as RelayActionName;
+  }
+
+  private authenticatePlugin(body: JsonObject): PluginSession | undefined {
+    if (typeof body.sessionId !== "string" || typeof body.agentToken !== "string") return undefined;
+    const session = this.sessions.get(body.sessionId);
+    if (!session || Date.now() - session.lastSeenAt >= this.sessionTtlMs) return undefined;
+    const candidate = tokenHash(body.agentToken);
+    return secureEqual(session.tokenHash, candidate) ? session : undefined;
+  }
+
+  private sessionForPairingCode(code: string): PluginSession | undefined {
+    const sessionId = this.sessionByPairingCode.get(code);
+    const session = sessionId ? this.sessions.get(sessionId) : undefined;
+    return session && Date.now() - session.lastSeenAt < this.sessionTtlMs ? session : undefined;
+  }
+
+  private activeSessions(): PluginSession[] {
+    return [...this.sessions.values()].filter(
+      (session) => Date.now() - session.lastSeenAt < this.sessionTtlMs,
+    );
+  }
+
+  private cleanup(): void {
+    const now = Date.now();
+    for (const session of this.sessions.values()) {
+      if (now - session.lastSeenAt >= this.sessionTtlMs) this.removeSession(session.id);
+    }
+    for (const job of this.jobs.values()) {
+      if (now - job.updatedAt >= this.jobTtlMs) {
+        if (job.timeout) clearTimeout(job.timeout);
+        this.jobs.delete(job.id);
+      }
+    }
+  }
+
+  private removeSession(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    this.sessions.delete(session.id);
+    this.sessionByInstallation.delete(session.installationId);
+    this.sessionByPairingCode.delete(session.pairingCode);
+    for (const job of this.jobs.values()) {
+      if (job.sessionId === session.id && (job.status === "queued" || job.status === "running")) {
+        if (job.timeout) clearTimeout(job.timeout);
+        job.status = "failed";
+        job.error = "Studio plugin disconnected.";
+        job.updatedAt = Date.now();
+      }
+    }
+  }
+
+  private optionalSessionMetadata(body: JsonObject): Partial<PluginSession> {
+    return {
+      ...(typeof body.studioUserId === "number" && Number.isFinite(body.studioUserId)
+        ? { studioUserId: body.studioUserId }
+        : {}),
+      ...(typeof body.placeId === "number" && Number.isFinite(body.placeId)
+        ? { placeId: body.placeId }
+        : {}),
+      ...(typeof body.placeName === "string" ? { placeName: body.placeName.slice(0, 200) } : {}),
+      ...(typeof body.pluginVersion === "string"
+        ? { pluginVersion: body.pluginVersion.slice(0, 40) }
+        : {}),
+    };
+  }
+
+  private publicSession(session: PluginSession): JsonObject {
+    return {
+      placeId: session.placeId ?? 0,
+      placeName: session.placeName ?? "Unknown place",
+      pluginVersion: session.pluginVersion ?? "unknown",
+      connectedAt: session.connectedAt,
+      lastSeenAt: session.lastSeenAt,
+    };
+  }
+
+  private publicJob(job: RelayJob): JsonObject {
+    return {
+      jobId: job.id,
+      action: job.action,
+      status: job.status,
+      createdAt: job.createdAt,
+      updatedAt: job.updatedAt,
+      ...(job.result === undefined ? {} : { result: job.result }),
+      ...(job.error === undefined ? {} : { error: job.error }),
+      ...(job.status === "queued" || job.status === "running" ? { pollAfterMs: 600 } : {}),
+    };
+  }
+
+  private extractPluginError(value: unknown): string {
+    if (isJsonObject(value) && typeof value.message === "string") return value.message;
+    return typeof value === "string" ? value : "Studio command failed.";
+  }
+
+  private async readJson(request: IncomingMessage): Promise<JsonObject> {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    for await (const chunk of request) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += buffer.byteLength;
+      if (size > MAX_BODY_BYTES) throw new Error("Request exceeds 4 MiB.");
+      chunks.push(buffer);
+    }
+    const raw = Buffer.concat(chunks).toString("utf8");
+    const parsed: unknown = raw ? JSON.parse(raw) : {};
+    if (!isJsonObject(parsed)) throw new Error("Expected a JSON object.");
+    return parsed;
+  }
+
+  private requiredString(value: unknown, name: string, maxLength: number): string {
+    if (typeof value !== "string" || value.length < 1 || value.length > maxLength) {
+      throw new Error(`${name} must be a string between 1 and ${maxLength} characters.`);
+    }
+    return value;
+  }
+
+  private json(response: ServerResponse, status: number, body: unknown): void {
+    response.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
+    response.end(JSON.stringify(body));
+  }
+
+  private html(response: ServerResponse, status: number, body: string): void {
+    response.writeHead(status, { "Content-Type": "text/html; charset=utf-8" });
+    response.end(body);
+  }
+
+  private applyHeaders(response: ServerResponse): void {
+    response.setHeader("Cache-Control", "no-store");
+    response.setHeader("X-Content-Type-Options", "nosniff");
+    response.setHeader("X-Frame-Options", "DENY");
+    response.setHeader("Referrer-Policy", "no-referrer");
+    response.setHeader("Access-Control-Allow-Origin", "https://chatgpt.com");
+    response.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+    response.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  }
+
+  openApiDocument(): JsonObject {
+    const actionNames = Object.keys(ACTIONS);
+    const pairingSchema = {
+      type: "string",
+      pattern: "^[A-Z2-9]{5}-[A-Z2-9]{5}$",
+      description: "Temporary pairing code shown by the Motion Director Roblox Studio plugin.",
+    };
+    return {
+      openapi: "3.1.0",
+      info: {
+        title: "Motion Director for Roblox Studio",
+        version: "0.3.0",
+        description:
+          "Pairs a ChatGPT conversation with a user's open Roblox Studio and executes bounded animation-authoring operations.",
+      },
+      servers: [{ url: this.publicBaseUrl }],
+      paths: {
+        "/v1/actions/studio-status": {
+          post: {
+            operationId: "getMotionDirectorStudioStatus",
+            summary: "Verify a pairing code and inspect the connected Studio.",
+            requestBody: {
+              required: true,
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    required: ["pairingCode"],
+                    properties: { pairingCode: pairingSchema },
+                  },
+                },
+              },
+            },
+            responses: { "200": { description: "Connected Studio status." } },
+          },
+        },
+        "/v1/actions/execute": {
+          post: {
+            operationId: "executeMotionDirectorAction",
+            summary: "Queue one bounded Motion Director action in the paired Studio.",
+            description:
+              "Write actions require confirmWrite=true only after the user explicitly approves the change.",
+            requestBody: {
+              required: true,
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    required: ["pairingCode", "action", "input"],
+                    properties: {
+                      pairingCode: pairingSchema,
+                      action: { type: "string", enum: actionNames },
+                      input: {
+                        type: "object",
+                        additionalProperties: true,
+                        description: "Parameters for the selected bounded action.",
+                      },
+                      confirmWrite: {
+                        type: "boolean",
+                        default: false,
+                        description:
+                          "Set true only after the user approved a write action in the current conversation.",
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            responses: {
+              "200": { description: "Immediate validation result." },
+              "202": { description: "Queued asynchronous Studio job." },
+              "409": { description: "Explicit confirmation required." },
+            },
+          },
+        },
+        "/v1/actions/job": {
+          post: {
+            operationId: "getMotionDirectorJob",
+            summary: "Poll a queued Motion Director Studio job.",
+            requestBody: {
+              required: true,
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    required: ["pairingCode", "jobId"],
+                    properties: {
+                      pairingCode: pairingSchema,
+                      jobId: { type: "string", format: "uuid" },
+                    },
+                  },
+                },
+              },
+            },
+            responses: { "200": { description: "Current job state and eventual result." } },
+          },
+        },
+      },
+    };
+  }
+
+  private privacyPolicy(): string {
+    return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>Motion Director Privacy Policy</title></head><body>
+<main><h1>Motion Director Privacy Policy</h1>
+<p>Motion Director relays commands between ChatGPT and the Roblox Studio session that a user explicitly pairs.</p>
+<h2>Data processed</h2><p>Temporary pairing codes, plugin version, place identifier and name, animation drafts, selected rig metadata, command results, and operational timestamps.</p>
+<h2>Purpose</h2><p>Data is used only to route requested animation operations, return results, prevent abuse, and diagnose failures.</p>
+<h2>Retention</h2><p>Pairing sessions and command jobs are temporary and expire automatically. Production deployments must configure infrastructure logs with the shortest practical retention.</p>
+<h2>Sharing</h2><p>Motion Director does not sell personal data. Data is sent only to the paired Roblox Studio session and infrastructure providers required to operate the relay.</p>
+<h2>User control</h2><p>Closing Studio, disabling remote mode, or regenerating the pairing code ends access. Users can discard staged animations before commit.</p>
+<h2>Security</h2><p>The relay exposes a fixed allowlist of animation operations and does not provide arbitrary Luau or filesystem execution.</p>
+<p>Contact: replace-this-address-before-publication@example.com</p></main></body></html>`;
+  }
+}

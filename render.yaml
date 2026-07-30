@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: motion-director-relay
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: npm run relay:start
+    healthCheckPath: /health
+    envVars:
+      - key: MOTION_RELAY_HOST
+        value: 0.0.0.0

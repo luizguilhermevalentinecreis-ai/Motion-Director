@@ -1,0 +1,18 @@
+{
+  "name": "MotionDirectorTestPlace",
+  "tree": {
+    "$className": "DataModel",
+    "Workspace": {
+      "$className": "Workspace",
+      "MotionDirectorTestScene": {
+        "$className": "Folder"
+      }
+    },
+    "ReplicatedStorage": {
+      "$className": "ReplicatedStorage"
+    },
+    "ServerStorage": {
+      "$className": "ServerStorage"
+    }
+  }
+}
