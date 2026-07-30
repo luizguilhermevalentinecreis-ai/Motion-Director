@@ -13,6 +13,7 @@ export type RelayActionName =
   | "inspectAnimation"
   | "compareAnimations"
   | "validateAnimationDraft"
+  | "stageR6ToR15Retarget"
   | "stageAnimationDraft"
   | "commitAnimationDraft"
   | "discardAnimationDraft"
@@ -34,6 +35,11 @@ const ACTIONS: Record<RelayActionName, ActionDefinition> = {
   inspectAnimation: { method: "analysis.inspectAnimation", write: false, timeoutMs: 180_000 },
   compareAnimations: { method: "analysis.compareAnimations", write: false, timeoutMs: 180_000 },
   validateAnimationDraft: { write: false, timeoutMs: 10_000 },
+  stageR6ToR15Retarget: {
+    method: "animation.stageR6ToR15Retarget",
+    write: true,
+    timeoutMs: 300_000,
+  },
   stageAnimationDraft: { method: "animation.stageDraft", write: true, timeoutMs: 120_000 },
   commitAnimationDraft: { method: "animation.commitDraft", write: true, timeoutMs: 120_000 },
   discardAnimationDraft: { method: "animation.discardDraft", write: true, timeoutMs: 30_000 },
@@ -250,13 +256,14 @@ function actionInputOpenApiSchema(): JsonObject {
   return {
     type: "object",
     description:
-      "Action-specific parameters. validateAnimationDraft requires draft. stageAnimationDraft requires transactionName and draft.",
+      "Action-specific parameters. validateAnimationDraft requires draft. stageAnimationDraft requires transactionName and draft. stageR6ToR15Retarget converts a complete local KeyframeSequence inside Studio.",
     properties: {
       transactionName: {
         type: "string",
         minLength: 1,
         maxLength: 120,
-        description: "Required by stageAnimationDraft; names the reversible staging transaction.",
+        description:
+          "Required by staging actions; names the reversible staging transaction.",
       },
       draft: animationDraftOpenApiSchema(),
       transactionId: {
@@ -287,6 +294,47 @@ function actionInputOpenApiSchema(): JsonObject {
         type: "string",
         description:
           "Exact KeyframeSequence path returned by listAnimations. Prefer this when names are duplicated.",
+      },
+      sourceRigPath: {
+        type: "string",
+        description:
+          "Exact source R6 Model path for stageR6ToR15Retarget. May be omitted when the source rig is selected.",
+      },
+      targetRigPath: {
+        type: "string",
+        description:
+          "Exact target R15 Model path for stageR6ToR15Retarget. May be omitted when both rigs are selected.",
+      },
+      sourceSelectionIndex: {
+        type: "integer",
+        minimum: 1,
+        description: "One-based selected source rig index. Defaults to 1.",
+      },
+      targetSelectionIndex: {
+        type: "integer",
+        minimum: 1,
+        description: "One-based selected target rig index. Defaults to 2.",
+      },
+      outputName: {
+        type: "string",
+        minLength: 1,
+        maxLength: 120,
+        description: "Name of the staged retargeted KeyframeSequence.",
+      },
+      legLateralScale: {
+        type: "number",
+        minimum: 0,
+        maximum: 1,
+        default: 0.4,
+        description:
+          "Scales only converted R15 upper-leg X translation after neutral rebasing.",
+      },
+      maxLegLateralOffset: {
+        type: "number",
+        minimum: 0,
+        maximum: 1,
+        default: 0.12,
+        description: "Maximum absolute R15 upper-leg X offset in studs.",
       },
       occurrence: { type: "integer", minimum: 1 },
       rigPath: {
@@ -799,6 +847,58 @@ export class MotionDirectorWebRelay {
       if (problems.length > 0) throw new Error(problems.join("\n"));
       return { transactionName, draft };
     }
+    if (action === "stageR6ToR15Retarget") {
+      const transactionName = this.requiredString(
+        input.transactionName,
+        "transactionName",
+        120,
+      );
+      const sourcePath =
+        typeof input.sourcePath === "string" && input.sourcePath.length > 0
+          ? input.sourcePath
+          : undefined;
+      const animationName =
+        typeof input.animationName === "string" && input.animationName.length > 0
+          ? input.animationName
+          : undefined;
+      if (!sourcePath && !animationName) {
+        throw new Error("stageR6ToR15Retarget requires sourcePath or animationName.");
+      }
+      const optionalString = (value: unknown, name: string, maximum: number) =>
+        value === undefined ? undefined : this.requiredString(value, name, maximum);
+      const sourceRigPath = optionalString(input.sourceRigPath, "sourceRigPath", 500);
+      const targetRigPath = optionalString(input.targetRigPath, "targetRigPath", 500);
+      const outputName = optionalString(input.outputName, "outputName", 120);
+      const legLateralScale = Number(input.legLateralScale);
+      const maxLegLateralOffset = Number(input.maxLegLateralOffset);
+      return {
+        transactionName,
+        ...(sourcePath ? { sourcePath } : {}),
+        ...(animationName ? { animationName } : {}),
+        ...(Number.isFinite(Number(input.occurrence))
+          ? { occurrence: Math.max(1, Math.trunc(Number(input.occurrence))) }
+          : {}),
+        ...(sourceRigPath ? { sourceRigPath } : {}),
+        ...(targetRigPath ? { targetRigPath } : {}),
+        ...(outputName ? { outputName } : {}),
+        sourceSelectionIndex: Math.max(
+          1,
+          Math.trunc(Number(input.sourceSelectionIndex) || 1),
+        ),
+        targetSelectionIndex: Math.max(
+          1,
+          Math.trunc(Number(input.targetSelectionIndex) || 2),
+        ),
+        legLateralScale: Math.min(
+          1,
+          Math.max(0, Number.isFinite(legLateralScale) ? legLateralScale : 0.4),
+        ),
+        maxLegLateralOffset: Math.min(
+          1,
+          Math.max(0, Number.isFinite(maxLegLateralOffset) ? maxLegLateralOffset : 0.12),
+        ),
+      };
+    }
     if (action === "commitAnimationDraft") {
       return {
         transactionId: this.requiredString(input.transactionId, "transactionId", 160),
@@ -983,7 +1083,7 @@ export class MotionDirectorWebRelay {
       openapi: "3.1.0",
       info: {
         title: "Motion Director for Roblox Studio",
-        version: "0.4.1",
+        version: "0.5.0",
         description:
           "Pairs a ChatGPT conversation with a user's open Roblox Studio and executes bounded animation-authoring operations.",
       },

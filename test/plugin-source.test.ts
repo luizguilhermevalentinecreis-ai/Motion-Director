@@ -6,6 +6,10 @@ const pluginSourceUrl = new URL(
   "../studio-plugin/MotionDirectorPlugin.server.lua",
   import.meta.url,
 );
+const retargeterSourceUrl = new URL(
+  "../studio-plugin/R6ToR15Retargeter.lua",
+  import.meta.url,
+);
 
 test("plugin persists human-review provenance on baked sequences", async () => {
   const source = await readFile(pluginSourceUrl, "utf8");
@@ -44,4 +48,19 @@ test("plugin exposes edit-time posing and a maximum-ten human finalization gate"
   assert.match(source, /animation\.resetSelectedRigPose/);
   assert.match(source, /animation\.finalizeHumanReview/);
   assert.match(source, /#approvedNames > 10/);
+});
+
+test("plugin retargets complete R6 sequences through world space and neutral rebasing", async () => {
+  const [plugin, retargeter] = await Promise.all([
+    readFile(pluginSourceUrl, "utf8"),
+    readFile(retargeterSourceUrl, "utf8"),
+  ]);
+  assert.match(plugin, /animation\.stageR6ToR15Retarget/);
+  assert.match(plugin, /r6ToR15RetargeterVersion = 1/);
+  assert.match(retargeter, /parentWorld \* item\.joint\.C0 \* transform \* item\.joint\.C1:Inverse\(\)/);
+  assert.match(retargeter, /target\.root\.CFrame \* source\.root\.CFrame:Inverse\(\) \* sourceWorld\[sourceName\]/);
+  assert.match(retargeter, /neutral\[item\.childName\]:Inverse\(\) \* converted/);
+  assert.match(retargeter, /collectPoseState\(child, state\)/);
+  assert.match(retargeter, /MotionDirectorRigidR15Chains/);
+  assert.match(retargeter, /MotionDirectorLegLateralScale/);
 });

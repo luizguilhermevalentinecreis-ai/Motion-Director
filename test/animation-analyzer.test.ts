@@ -21,6 +21,7 @@ test("exposes the animation analyzer through plugin and MCP commands", async () 
   assert.match(server, /list_analyzable_animations/);
   assert.match(server, /inspect_animation_full/);
   assert.match(server, /compare_animation_motion/);
+  assert.match(server, /stage_r6_animation_as_r15/);
 
   assert.match(analyzer, /serializeKeyframe/);
   assert.match(analyzer, /serializePose/);

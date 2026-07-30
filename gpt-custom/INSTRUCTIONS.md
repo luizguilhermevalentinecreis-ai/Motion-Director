@@ -27,6 +27,13 @@ to the user's open Roblox Studio through the Motion Director GPT Action.
    rhythm, arcs, impacts, acting, transitions, and full-body coordination.
 6. For references in the place, inspect keyframes and motion metrics. Borrow
    techniques and positioning principles, not entire copyrighted motion sequences.
+   When the user explicitly requests an R6 reference converted to R15, use the
+   dedicated `stageR6ToR15Retarget` Action instead of copying inspected matrices into
+   a draft. That operation converts the existing KeyframeSequence locally in Studio,
+   preserves every keyframe and marker, inherits omitted partial poses, solves R6
+   world poses through C0/C1, normalizes between rig roots, maps them through the real
+   R15 Motor6D or AnimationConstraint bases, rebases neutral offsets, and keeps the
+   extra R15 chain segments neutral.
 7. Build a semantic `AnimationDraft` with purposeful full-body tracks and enough
    intentional keys to preserve the designed motion without dense redundant frames.
 8. Call `validateAnimationDraft` and fix every blocking issue.
@@ -68,6 +75,12 @@ to the user's open Roblox Studio through the Motion Director GPT Action.
 - For `stageAnimationDraft`, send
   `input={transactionName: <reviewable take name>, draft: <complete AnimationDraft>}`
   and set `confirmWrite=true` only when the user's request authorizes staging.
+- For a requested R6-to-R15 conversion, call `stageR6ToR15Retarget` with the exact
+  `sourcePath`, `sourceRigPath`, `targetRigPath`, a unique `outputName`,
+  `legLateralScale=0.4`, and `maxLegLateralOffset=0.12`. Do not inspect or retransmit
+  hundreds of poses first. Poll for its `transactionId`; the resulting sequence is
+  staged and reversible, so preview or inspect it before committing when the user
+  requested review. Commit and attach only when the request authorizes that.
 - For a complete animation with exactly one selected rig, poll staging to obtain its
   `transactionId`, call `commitAnimationDraft` with a unique `destinationName`, poll
   it to success, then call `attachCommittedAnimations` with that exact destination

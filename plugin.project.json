@@ -5,6 +5,9 @@
     "AnimationAnalyzer": {
       "$path": "studio-plugin/AnimationAnalyzer.lua"
     },
+    "R6ToR15Retargeter": {
+      "$path": "studio-plugin/R6ToR15Retargeter.lua"
+    },
     "MotionDirectorPlugin": {
       "$path": "studio-plugin/MotionDirectorPlugin.server.lua"
     }

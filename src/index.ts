@@ -18,7 +18,7 @@ const bridge = new StudioBridge(
 
 const server = new McpServer({
   name: "roblox-motion-director",
-  version: "0.4.1",
+  version: "0.5.0",
 });
 
 server.registerResource(
@@ -282,6 +282,40 @@ server.registerTool(
   async (input) => {
     try {
       return jsonContent(await bridge.execute("analysis.compareAnimations", input, 180_000));
+    } catch (error) {
+      return errorContent(error);
+    }
+  },
+);
+
+server.registerTool(
+  "stage_r6_animation_as_r15",
+  {
+    title: "Stage a complete R6 KeyframeSequence retargeted to R15",
+    description:
+      "Converts the source animation entirely inside Studio using proven world-space C0/C1 reconstruction, root normalization, partial-pose inheritance, R15 joint-base solving, neutral rebasing, rigid neutral lower chains, and bounded upper-leg lateral translation. Returns a reversible transactionId; it does not commit or attach automatically.",
+    inputSchema: {
+      transactionName: z.string().min(1).max(120),
+      sourcePath: z.string().min(1).max(500).optional(),
+      animationName: z.string().min(1).max(160).optional(),
+      occurrence: z.number().int().min(1).max(100).default(1),
+      sourceRigPath: z.string().min(1).max(500).optional(),
+      targetRigPath: z.string().min(1).max(500).optional(),
+      sourceSelectionIndex: z.number().int().min(1).max(20).default(1),
+      targetSelectionIndex: z.number().int().min(1).max(20).default(2),
+      outputName: z.string().min(1).max(120).optional(),
+      legLateralScale: z.number().min(0).max(1).default(0.4),
+      maxLegLateralOffset: z.number().min(0).max(1).default(0.12),
+    },
+  },
+  async (input) => {
+    try {
+      if (!input.sourcePath && !input.animationName) {
+        return errorContent(new Error("Provide sourcePath or animationName."));
+      }
+      return jsonContent(
+        await bridge.execute("animation.stageR6ToR15Retarget", input, 300_000),
+      );
     } catch (error) {
       return errorContent(error);
     }

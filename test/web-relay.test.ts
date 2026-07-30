@@ -30,7 +30,7 @@ test("pairs a GPT action with a Studio plugin and returns an async result", asyn
       launchId: "test-launch",
       placeId: 123,
       placeName: "Relay test place",
-      pluginVersion: "0.4.1",
+      pluginVersion: "0.5.0",
     });
     assert.equal(connectResponse.status, 200);
     const connection = (await connectResponse.json()) as {
@@ -147,6 +147,69 @@ test("translates inspectAnimation pages into bounded plugin sections", async () 
       includeRaw: true,
       includeSamples: false,
       includeMetrics: false,
+    });
+  } finally {
+    await relay.stop();
+  }
+});
+
+test("stages bounded in-Studio R6 to R15 retargeting without transmitting pose matrices", async () => {
+  const port = randomPort();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const relay = new MotionDirectorWebRelay({
+    host: "127.0.0.1",
+    port,
+    publicBaseUrl: baseUrl,
+    sessionTtlMs: 10_000,
+  });
+  await relay.start();
+  try {
+    const connectResponse = await post(baseUrl, "/plugin/connect", {
+      installationId: "retarget-test-installation",
+      launchId: "retarget-test-launch",
+      pairingCode: "R6R15-23456",
+      placeName: "Retarget test",
+    });
+    const connection = (await connectResponse.json()) as {
+      sessionId: string;
+      agentToken: string;
+      pairingCode: string;
+    };
+
+    const executeResponse = await post(baseUrl, "/v1/actions/execute", {
+      pairingCode: connection.pairingCode,
+      action: "stageR6ToR15Retarget",
+      confirmWrite: true,
+      input: {
+        transactionName: "Ravage Succsess R15 conversion",
+        sourcePath: "ServerStorage.RBX_ANIMSAVES.kj anims.Ravage Succsess",
+        sourceRigPath: "Workspace.References.kj anims",
+        targetRigPath: "Workspace.R15",
+        outputName: "Ravage Succsess R15",
+        legLateralScale: 0,
+        maxLegLateralOffset: 0.1,
+      },
+    });
+    assert.equal(executeResponse.status, 202);
+
+    const pollResponse = await post(baseUrl, "/plugin/poll", {
+      sessionId: connection.sessionId,
+      agentToken: connection.agentToken,
+    });
+    const polled = (await pollResponse.json()) as {
+      command: { method: string; params: Record<string, unknown> };
+    };
+    assert.equal(polled.command.method, "animation.stageR6ToR15Retarget");
+    assert.deepEqual(polled.command.params, {
+      transactionName: "Ravage Succsess R15 conversion",
+      sourcePath: "ServerStorage.RBX_ANIMSAVES.kj anims.Ravage Succsess",
+      sourceRigPath: "Workspace.References.kj anims",
+      targetRigPath: "Workspace.R15",
+      outputName: "Ravage Succsess R15",
+      sourceSelectionIndex: 1,
+      targetSelectionIndex: 2,
+      legLateralScale: 0,
+      maxLegLateralOffset: 0.1,
     });
   } finally {
     await relay.stop();
@@ -334,7 +397,7 @@ test("serves a GPT-compatible OpenAPI document and privacy policy", async () => 
       >;
     };
     assert.equal(document.openapi, "3.1.0");
-    assert.equal(document.info.version, "0.4.1");
+    assert.equal(document.info.version, "0.5.0");
     assert.equal(document.servers[0]?.url, baseUrl);
     assert.ok(document.paths["/v1/actions/execute"]);
     const actionInput =
@@ -345,6 +408,9 @@ test("serves a GPT-compatible OpenAPI document and privacy policy", async () => 
     assert.ok(actionInput?.sourcePath);
     assert.ok(actionInput?.section);
     assert.ok(actionInput?.rawCount);
+    assert.ok(actionInput?.sourceRigPath);
+    assert.ok(actionInput?.targetRigPath);
+    assert.ok(actionInput?.legLateralScale);
     assert.ok(
       (
         actionInput?.draft as {
