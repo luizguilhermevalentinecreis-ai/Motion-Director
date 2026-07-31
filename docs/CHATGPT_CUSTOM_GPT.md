@@ -89,10 +89,11 @@ GET https://your-relay-domain.example/privacy
 4. Choose `None` for authentication during the pairing-code beta.
 5. Import `https://your-relay-domain.example/openapi.json`.
 6. Set the privacy policy URL to `https://your-relay-domain.example/privacy`.
-7. Test all five operations in Preview:
+7. Test all six operations in Preview:
    - `getMotionDirectorGlobalKnowledge`
    - `proposeMotionDirectorGlobalKnowledge`
    - `getMotionDirectorStudioStatus`
+   - `createMotionDirectorAnimationDraft`
    - `executeMotionDirectorAction`
    - `getMotionDirectorJob`
 8. Before publishing, replace the policy contact with a real support contact.
@@ -108,6 +109,8 @@ GET https://your-relay-domain.example/privacy
 - Write actions require `confirmWrite=true`.
 - The relay accepts at most eight simultaneous jobs per Studio session.
 - Request bodies are capped at 4 MiB.
+- Authored blueprints are converted to quaternion drafts and stored under a
+  short-lived, Studio-scoped `draftId`; validation and staging accept that ID.
 - Pairing and job data expire automatically and are not persisted.
 - Global knowledge proposals remain pending until an allowlisted development
   installation selects `COMMIT GLOBAL` or `REJECT`.

@@ -10,6 +10,7 @@ without an AI-provider API key.
 - Studio connection and selection inspection;
 - Motor6D/Bone rig inspection;
 - rich semantic animation draft schema;
+- compact Euler-degree animation blueprints converted into complete stored drafts;
 - deterministic draft validation and quality review;
 - MCP authoring protocol, quality rubric, and professional direction prompt;
 - reversible `KeyframeSequence` staging;
@@ -21,9 +22,9 @@ without an AI-provider API key.
 - center-of-mass, support, velocity, path, angular-speed, and root-relative support-travel metrics;
 - normalized phase-aware comparison between two animation clips.
 
-This is foundation work, not yet a motion generator. It establishes the
-professional edit contract so future generators and AI agents do not have to
-approximate animation by issuing raw joint rotations.
+The relay now exposes a first-class draft-authoring operation. GPTs can submit a
+compact full-body blueprint, receive a short-lived `draftId`, then validate and
+stage the complete generated `AnimationDraft` without retransmitting it.
 
 ## Development
 

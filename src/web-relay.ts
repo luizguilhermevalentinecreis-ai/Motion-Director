@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { animationDraftSchema, validateTemporalIntegrity } from "./domain.js";
+import { animationDraftSchema, validateTemporalIntegrity, type AnimationDraft } from "./domain.js";
+import { animationBlueprintSchema, draftFromBlueprint } from "./draft-authoring.js";
 import {
   createGlobalKnowledgeStore,
   type GlobalKnowledgeStore,
@@ -11,6 +12,7 @@ import { reviewDraft } from "./quality.js";
 type JsonObject = Record<string, unknown>;
 
 export type RelayActionName =
+  | "createAnimationDraft"
   | "getAnimationCapabilities"
   | "getSceneSelection"
   | "inspectRig"
@@ -33,6 +35,7 @@ interface ActionDefinition {
 }
 
 const ACTIONS: Record<RelayActionName, ActionDefinition> = {
+  createAnimationDraft: { write: false, timeoutMs: 10_000 },
   getAnimationCapabilities: { method: "system.capabilities", write: false, timeoutMs: 10_000 },
   getSceneSelection: { method: "scene.getSelection", write: false, timeoutMs: 30_000 },
   inspectRig: { method: "rig.inspect", write: false, timeoutMs: 30_000 },
@@ -94,6 +97,15 @@ interface RelayJob {
   result?: unknown;
   error?: string;
   timeout?: NodeJS.Timeout;
+}
+
+interface StoredAnimationDraft {
+  id: string;
+  sessionId: string;
+  pairingCode: string;
+  draft: AnimationDraft;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface WebRelayOptions {
@@ -263,6 +275,88 @@ function animationDraftOpenApiSchema(): JsonObject {
   };
 }
 
+function animationBlueprintOpenApiSchema(): JsonObject {
+  const vector3 = {
+    type: "object",
+    required: ["x", "y", "z"],
+    properties: {
+      x: { type: "number" },
+      y: { type: "number" },
+      z: { type: "number" },
+    },
+    additionalProperties: false,
+  };
+  const easing = {
+    type: "object",
+    required: ["style", "direction"],
+    properties: {
+      style: { type: "string", enum: ["linear", "constant", "cubic", "cubicV2", "elastic", "bounce"] },
+      direction: { type: "string", enum: ["in", "out", "inOut"] },
+    },
+    additionalProperties: false,
+  };
+  const key = {
+    type: "object",
+    required: ["time", "rotationDegrees"],
+    properties: {
+      time: { type: "number", minimum: 0 },
+      position: { ...vector3, default: { x: 0, y: 0, z: 0 } },
+      rotationDegrees: {
+        ...vector3,
+        description: "Roblox XYZ Euler rotation in degrees. The relay converts it to a normalized quaternion.",
+      },
+      easing: { ...easing, default: { style: "cubicV2", direction: "inOut" } },
+      weight: { type: "number", minimum: 0, maximum: 1, default: 1 },
+      tangentIn: vector3,
+      tangentOut: vector3,
+    },
+    additionalProperties: false,
+  };
+  return {
+    type: "object",
+    required: ["name", "rigId", "rigType", "duration", "priority", "intent", "tracks"],
+    description:
+      "Compact professional animation blueprint. Supply purposeful pose keys in Euler degrees; the relay creates and stores the complete AnimationDraft.",
+    properties: {
+      name: { type: "string", minLength: 1, maxLength: 120 },
+      rigId: { type: "string", minLength: 1, description: "Exact selected rig path or ID returned by inspectRig." },
+      rigType: { type: "string", enum: ["R6", "R15", "Custom"] },
+      duration: { type: "number", exclusiveMinimum: 0, maximum: 300 },
+      framesPerSecond: { type: "integer", minimum: 12, maximum: 120, default: 30 },
+      looped: { type: "boolean", default: false },
+      priority: { type: "string", enum: ["core", "idle", "movement", "action", "action2", "action3", "action4"] },
+      authoredHipHeight: { type: "number" },
+      intent: { type: "string", minLength: 1 },
+      style: { type: "array", items: { type: "string" }, default: [] },
+      beats: {
+        type: "array",
+        items: ((animationDraftOpenApiSchema() as { properties: JsonObject }).properties.beats as JsonObject).items,
+        default: [],
+      },
+      contacts: {
+        type: "array",
+        items: ((animationDraftOpenApiSchema() as { properties: JsonObject }).properties.contacts as JsonObject).items,
+        default: [],
+      },
+      tracks: {
+        type: "array",
+        minItems: 1,
+        items: {
+          type: "object",
+          required: ["joint", "keys"],
+          properties: {
+            joint: { type: "string", minLength: 1, description: "Exact track name returned by inspectRig." },
+            space: { type: "string", enum: ["local", "motor", "parent", "character", "world"], default: "parent" },
+            keys: { type: "array", minItems: 1, items: key },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    additionalProperties: false,
+  };
+}
+
 function actionInputOpenApiSchema(): JsonObject {
   return {
     type: "object",
@@ -276,6 +370,13 @@ function actionInputOpenApiSchema(): JsonObject {
         description:
           "Required by staging actions; names the reversible staging transaction.",
       },
+      draftId: {
+        type: "string",
+        format: "uuid",
+        description:
+          "Stored draft returned by createMotionDirectorAnimationDraft. validateAnimationDraft and stageAnimationDraft accept this instead of retransmitting input.draft.",
+      },
+      blueprint: animationBlueprintOpenApiSchema(),
       draft: animationDraftOpenApiSchema(),
       transactionId: {
         type: "string",
@@ -446,6 +547,7 @@ export class MotionDirectorWebRelay {
   private readonly sessionByPairingCode = new Map<string, string>();
   private readonly jobs = new Map<string, RelayJob>();
   private readonly jobByCommand = new Map<string, string>();
+  private readonly authoredDrafts = new Map<string, StoredAnimationDraft>();
 
   constructor(options: WebRelayOptions = {}) {
     this.host = options.host ?? "0.0.0.0";
@@ -535,6 +637,10 @@ export class MotionDirectorWebRelay {
       }
       if (request.method === "POST" && url.pathname === "/v1/actions/studio-status") {
         await this.actionStudioStatus(request, response);
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/v1/drafts/create") {
+        await this.actionCreateAnimationDraft(request, response);
         return;
       }
       if (request.method === "POST" && url.pathname === "/v1/actions/execute") {
@@ -772,8 +878,12 @@ export class MotionDirectorWebRelay {
       });
       return;
     }
+    if (action === "createAnimationDraft") {
+      this.json(response, 200, this.createAnimationDraftResult(session, input.blueprint));
+      return;
+    }
     if (action === "validateAnimationDraft") {
-      const draft = animationDraftSchema.parse(input.draft);
+      const draft = this.draftFromInput(session, input);
       this.json(response, 200, {
         status: "succeeded",
         action,
@@ -792,7 +902,7 @@ export class MotionDirectorWebRelay {
       this.json(response, 429, { error: "Too many pending commands for this Studio session." });
       return;
     }
-    const params = this.validateActionInput(action, input);
+    const params = this.validateActionInput(action, input, session);
     const command: RelayCommand = {
       id: randomUUID(),
       method: definition.method!,
@@ -839,7 +949,11 @@ export class MotionDirectorWebRelay {
     this.json(response, 200, this.publicJob(job));
   }
 
-  private validateActionInput(action: RelayActionName, input: JsonObject): JsonObject {
+  private validateActionInput(
+    action: RelayActionName,
+    input: JsonObject,
+    session: PluginSession,
+  ): JsonObject {
     if (action === "inspectAnimation") {
       const page = Math.max(1, Math.trunc(Number(input.page) || 1));
       const pageSize = Math.min(10, Math.max(1, Math.trunc(Number(input.pageSize) || 1)));
@@ -945,7 +1059,7 @@ export class MotionDirectorWebRelay {
     }
     if (action === "stageAnimationDraft") {
       const transactionName = this.requiredString(input.transactionName, "transactionName", 120);
-      const draft = animationDraftSchema.parse(input.draft);
+      const draft = this.draftFromInput(session, input);
       const problems = validateTemporalIntegrity(draft);
       if (problems.length > 0) throw new Error(problems.join("\n"));
       return { transactionName, draft };
@@ -1071,6 +1185,9 @@ export class MotionDirectorWebRelay {
         this.jobs.delete(job.id);
       }
     }
+    for (const draft of this.authoredDrafts.values()) {
+      if (now - draft.updatedAt >= this.jobTtlMs) this.authoredDrafts.delete(draft.id);
+    }
   }
 
   private removeSession(sessionId: string): void {
@@ -1079,6 +1196,9 @@ export class MotionDirectorWebRelay {
     this.sessions.delete(session.id);
     this.sessionByInstallation.delete(session.installationId);
     this.sessionByPairingCode.delete(session.pairingCode);
+    for (const draft of this.authoredDrafts.values()) {
+      if (draft.sessionId === session.id) this.authoredDrafts.delete(draft.id);
+    }
     for (const job of this.jobs.values()) {
       if (job.sessionId === session.id && (job.status === "queued" || job.status === "running")) {
         if (job.timeout) clearTimeout(job.timeout);
@@ -1155,6 +1275,64 @@ export class MotionDirectorWebRelay {
     };
   }
 
+  private async actionCreateAnimationDraft(
+    request: IncomingMessage,
+    response: ServerResponse,
+  ): Promise<void> {
+    const body = await this.readJson(request);
+    const code = normalizePairingCode(body.pairingCode);
+    const session = code ? this.sessionForPairingCode(code) : undefined;
+    if (!code || !session) {
+      this.json(response, 404, { error: "Pairing code is invalid, expired, or the Studio plugin is offline." });
+      return;
+    }
+    this.json(response, 200, this.createAnimationDraftResult(session, body.blueprint));
+  }
+
+  private createAnimationDraftResult(session: PluginSession, blueprint: unknown): JsonObject {
+    const parsedBlueprint = animationBlueprintSchema.parse(blueprint);
+    const draft = draftFromBlueprint(parsedBlueprint);
+    const problems = validateTemporalIntegrity(draft);
+    if (problems.length > 0) throw new Error(problems.join("\n"));
+    const report = reviewDraft(draft);
+    if (report.blockingIssues.length > 0) throw new Error(report.blockingIssues.join("\n"));
+    const record: StoredAnimationDraft = {
+      id: randomUUID(),
+      sessionId: session.id,
+      pairingCode: session.pairingCode,
+      draft,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    this.authoredDrafts.set(record.id, record);
+    return {
+      status: "succeeded",
+      draftId: record.id,
+      summary: {
+        name: draft.name,
+        rigId: draft.rigId,
+        duration: draft.duration,
+        framesPerSecond: draft.framesPerSecond,
+        trackCount: draft.tracks.length,
+        keyCount: draft.tracks.reduce((sum, track) => sum + track.keys.length, 0),
+      },
+      report,
+      next:
+        "Call validateAnimationDraft with input.draftId, then stageAnimationDraft with transactionName and the same draftId.",
+    };
+  }
+
+  private draftFromInput(session: PluginSession, input: JsonObject): AnimationDraft {
+    if (input.draft !== undefined) return animationDraftSchema.parse(input.draft);
+    const draftId = this.requiredString(input.draftId, "draftId", 100);
+    const stored = this.authoredDrafts.get(draftId);
+    if (!stored || stored.sessionId !== session.id) {
+      throw new Error("Unknown, expired, or unauthorized draftId for this Studio session.");
+    }
+    stored.updatedAt = Date.now();
+    return stored.draft;
+  }
+
   private extractPluginError(value: unknown): string {
     if (isJsonObject(value) && typeof value.message === "string") return value.message;
     return typeof value === "string" ? value : "Studio command failed.";
@@ -1214,7 +1392,7 @@ export class MotionDirectorWebRelay {
       openapi: "3.1.0",
       info: {
         title: "Motion Director for Roblox Studio",
-        version: "0.6.0",
+        version: "0.6.1",
         description:
           "Pairs ChatGPT with Roblox Studio, executes bounded animation-authoring operations, and distributes developer-approved global animation knowledge.",
       },
@@ -1307,6 +1485,35 @@ export class MotionDirectorWebRelay {
               },
             },
             responses: { "200": { description: "Connected Studio status." } },
+          },
+        },
+        "/v1/drafts/create": {
+          post: {
+            operationId: "createMotionDirectorAnimationDraft",
+            summary: "Create and store a complete animation draft from a compact blueprint.",
+            description:
+              "Use this after rig inspection. It converts Euler-degree pose keys into the complete quaternion AnimationDraft and returns draftId for validation and staging. This is the authoring operation; never report that draft creation is unavailable while it exists.",
+            requestBody: {
+              required: true,
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    required: ["pairingCode", "blueprint"],
+                    properties: {
+                      pairingCode: pairingSchema,
+                      blueprint: animationBlueprintOpenApiSchema(),
+                    },
+                    additionalProperties: false,
+                  },
+                },
+              },
+            },
+            responses: {
+              "200": { description: "Stored complete draft ID, summary, and quality report." },
+              "400": { description: "Invalid blueprint or blocking draft issue." },
+              "404": { description: "No paired Studio." },
+            },
           },
         },
         "/v1/actions/execute": {

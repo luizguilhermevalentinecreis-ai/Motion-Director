@@ -93,6 +93,94 @@ test("pairs a GPT action with a Studio plugin and returns an async result", asyn
   }
 });
 
+test("creates a compact authored draft and stages it by draftId", async () => {
+  const port = randomPort();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const relay = new MotionDirectorWebRelay({
+    host: "127.0.0.1",
+    port,
+    publicBaseUrl: baseUrl,
+    sessionTtlMs: 10_000,
+  });
+  await relay.start();
+  try {
+    const connectResponse = await post(baseUrl, "/plugin/connect", {
+      installationId: "draft-authoring-installation",
+      launchId: "draft-authoring-launch",
+      placeName: "Draft authoring test",
+    });
+    const connection = (await connectResponse.json()) as {
+      sessionId: string;
+      agentToken: string;
+      pairingCode: string;
+    };
+    const createResponse = await post(baseUrl, "/v1/drafts/create", {
+      pairingCode: connection.pairingCode,
+      blueprint: {
+        name: "M1_01",
+        rigId: "Workspace.Rig",
+        rigType: "R6",
+        duration: 0.45,
+        framesPerSecond: 30,
+        priority: "action",
+        intent: "A grounded hand-first M1.",
+        style: ["r6", "combat", "m1"],
+        tracks: [
+          {
+            joint: "Torso",
+            keys: [
+              { time: 0, rotationDegrees: { x: 0, y: 0, z: 0 } },
+              { time: 0.3, rotationDegrees: { x: 7, y: 18, z: -3 } },
+            ],
+          },
+          {
+            joint: "Right Arm",
+            keys: [
+              { time: 0, rotationDegrees: { x: 0, y: 0, z: 0 } },
+              { time: 0.3, rotationDegrees: { x: -70, y: 8, z: -12 } },
+            ],
+          },
+        ],
+      },
+    });
+    assert.equal(createResponse.status, 200);
+    const created = (await createResponse.json()) as {
+      draftId: string;
+      summary: { keyCount: number };
+    };
+    assert.match(created.draftId, /^[0-9a-f-]{36}$/);
+    assert.equal(created.summary.keyCount, 4);
+
+    const validateResponse = await post(baseUrl, "/v1/actions/execute", {
+      pairingCode: connection.pairingCode,
+      action: "validateAnimationDraft",
+      input: { draftId: created.draftId },
+    });
+    assert.equal(validateResponse.status, 200);
+
+    const stageResponse = await post(baseUrl, "/v1/actions/execute", {
+      pairingCode: connection.pairingCode,
+      action: "stageAnimationDraft",
+      confirmWrite: true,
+      input: { transactionName: "M1_01 review", draftId: created.draftId },
+    });
+    assert.equal(stageResponse.status, 202);
+
+    const pollResponse = await post(baseUrl, "/plugin/poll", {
+      sessionId: connection.sessionId,
+      agentToken: connection.agentToken,
+    });
+    const polled = (await pollResponse.json()) as {
+      command: { method: string; params: { transactionName: string; draft: { name: string } } };
+    };
+    assert.equal(polled.command.method, "animation.stageDraft");
+    assert.equal(polled.command.params.transactionName, "M1_01 review");
+    assert.equal(polled.command.params.draft.name, "M1_01");
+  } finally {
+    await relay.stop();
+  }
+});
+
 test("translates inspectAnimation pages into bounded plugin sections", async () => {
   const port = randomPort();
   const baseUrl = `http://127.0.0.1:${port}`;
@@ -400,15 +488,18 @@ test("serves a GPT-compatible OpenAPI document and privacy policy", async () => 
       >;
     };
     assert.equal(document.openapi, "3.1.0");
-    assert.equal(document.info.version, "0.6.0");
+    assert.equal(document.info.version, "0.6.1");
     assert.equal(document.servers[0]?.url, baseUrl);
     assert.ok(document.paths["/v1/knowledge/global"]);
     assert.ok(document.paths["/v1/knowledge/propose"]);
     assert.ok(document.paths["/v1/actions/execute"]);
+    assert.ok(document.paths["/v1/drafts/create"]);
     const actionInput =
       document.paths["/v1/actions/execute"]?.post?.requestBody?.content?.["application/json"]
         ?.schema?.properties?.input?.properties;
     assert.ok(actionInput?.transactionName);
+    assert.ok(actionInput?.draftId);
+    assert.ok(actionInput?.blueprint);
     assert.ok(actionInput?.draft);
     assert.ok(actionInput?.sourcePath);
     assert.ok(actionInput?.section);
