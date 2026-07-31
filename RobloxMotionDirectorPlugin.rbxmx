@@ -26,11 +26,13 @@ type PoseSample = {
 	easingStyle: string,
 	easingDirection: string,
 }
+type AnimationJoint = Motor6D | AnimationConstraint
 type RigData = {
 	rig: Model,
 	root: BasePart,
-	motors: { Motor6D },
-	motorByPart: { [string]: Motor6D },
+	joints: { AnimationJoint },
+	jointByPart: { [string]: AnimationJoint },
+	jointSystem: string,
 	parts: { [string]: BasePart },
 	animatedParts: { string },
 }
@@ -213,21 +215,33 @@ local function rigDataFor(rig: Model): RigData
 	if not root or not root:IsA("BasePart") then
 		error("Rig has no HumanoidRootPart or PrimaryPart: " .. rig:GetFullName())
 	end
-	local motors = {}
-	local motorByPart = {}
+	local joints: { AnimationJoint } = {}
+	local jointByPart: { [string]: AnimationJoint } = {}
+	local motorCount = 0
+	local animationConstraintCount = 0
 	local parts = {}
 	local animatedSet = { [root.Name] = true }
 	for _, descendant in rig:GetDescendants() do
 		if descendant:IsA("BasePart") then
 			parts[descendant.Name] = descendant
-		elseif descendant:IsA("Motor6D") and descendant.Part0 and descendant.Part1 then
-			table.insert(motors, descendant)
-			motorByPart[descendant.Part1.Name] = descendant
+		elseif
+			(descendant:IsA("Motor6D") or descendant:IsA("AnimationConstraint"))
+			and descendant.Part0
+			and descendant.Part1
+		then
+			local joint = descendant :: AnimationJoint
+			table.insert(joints, joint)
+			jointByPart[joint.Part1.Name] = joint
+			if joint:IsA("Motor6D") then
+				motorCount += 1
+			else
+				animationConstraintCount += 1
+			end
 			animatedSet[descendant.Part0.Name] = true
 			animatedSet[descendant.Part1.Name] = true
 		end
 	end
-	table.sort(motors, function(left, right)
+	table.sort(joints, function(left, right)
 		return left:GetFullName() < right:GetFullName()
 	end)
 	local animatedParts = {}
@@ -237,11 +251,19 @@ local function rigDataFor(rig: Model): RigData
 		end
 	end
 	table.sort(animatedParts)
+	local jointSystem = if animationConstraintCount > 0 and motorCount > 0
+		then "Hybrid"
+		elseif animationConstraintCount > 0
+		then "AnimationConstraint"
+		elseif motorCount > 0
+		then "Motor6D"
+		else "None"
 	return {
 		rig = rig,
 		root = root,
-		motors = motors,
-		motorByPart = motorByPart,
+		joints = joints,
+		jointByPart = jointByPart,
+		jointSystem = jointSystem,
 		parts = parts,
 		animatedParts = animatedParts,
 	}
@@ -250,16 +272,37 @@ end
 local function rigSnapshot(data: RigData, context: Context): Dictionary
 	local humanoid = data.rig:FindFirstChildOfClass("Humanoid")
 	local motors = {}
-	for _, motor in data.motors do
-		table.insert(motors, {
-			name = motor.Name,
-			path = context.pathOf(motor),
-			part0 = motor.Part0 and motor.Part0.Name or nil,
-			part1 = motor.Part1 and motor.Part1.Name or nil,
-			c0 = transform(motor.C0),
-			c1 = transform(motor.C1),
-			restTransform = transform(motor.Transform),
-		})
+	local animationConstraints = {}
+	local animationJoints = {}
+	for _, joint in data.joints do
+		local item: Dictionary = {
+			name = joint.Name,
+			className = joint.ClassName,
+			path = context.pathOf(joint),
+			part0 = joint.Part0 and joint.Part0.Name or nil,
+			part1 = joint.Part1 and joint.Part1.Name or nil,
+			trackName = joint.Part1 and joint.Part1.Name or joint.Name,
+			c0 = transform(joint.C0),
+			c1 = transform(joint.C1),
+			restTransform = transform(joint.Transform),
+		}
+		if joint:IsA("AnimationConstraint") then
+			item.attachment0 = joint.Attachment0 and {
+				name = joint.Attachment0.Name,
+				path = context.pathOf(joint.Attachment0),
+				cframe = transform(joint.Attachment0.CFrame),
+			} or nil
+			item.attachment1 = joint.Attachment1 and {
+				name = joint.Attachment1.Name,
+				path = context.pathOf(joint.Attachment1),
+				cframe = transform(joint.Attachment1.CFrame),
+			} or nil
+			item.isKinematic = joint.IsKinematic
+			table.insert(animationConstraints, item)
+		else
+			table.insert(motors, item)
+		end
+		table.insert(animationJoints, item)
 	end
 	local parts = {}
 	for _, name in data.animatedParts do
@@ -276,16 +319,36 @@ local function rigSnapshot(data: RigData, context: Context): Dictionary
 		name = data.rig.Name,
 		rigType = humanoid and humanoid.RigType.Name or "Custom",
 		rootPart = data.root.Name,
+		jointSystem = data.jointSystem,
+		animationJoints = animationJoints,
 		motors = motors,
+		animationConstraints = animationConstraints,
 		parts = parts,
 		attributes = attributes(data.rig),
 	}
 end
 
-local function serializePose(pose: Pose, parentPose: string?): Dictionary
+local function serializePose(
+	pose: Pose,
+	parentPose: string?,
+	includeParts: { [string]: boolean }?
+): Dictionary?
+	local posePath = if parentPose then parentPose .. "/" .. pose.Name else pose.Name
+	local children = {}
+	for _, child in pose:GetSubPoses() do
+		if child:IsA("Pose") then
+			local serialized = serializePose(child, posePath, includeParts)
+			if serialized then
+				table.insert(children, serialized)
+			end
+		end
+	end
+	if includeParts and not includeParts[pose.Name] and #children == 0 then
+		return nil
+	end
 	local item: Dictionary = {
 		name = pose.Name,
-		path = if parentPose then parentPose .. "/" .. pose.Name else pose.Name,
+		path = posePath,
 		parentPose = parentPose,
 		cframe = transform(pose.CFrame),
 		weight = round(pose.Weight),
@@ -299,12 +362,6 @@ local function serializePose(pose: Pose, parentPose: string?): Dictionary
 	if okMask then
 		item.maskWeight = round(maskWeight)
 	end
-	local children = {}
-	for _, child in pose:GetSubPoses() do
-		if child:IsA("Pose") then
-			table.insert(children, serializePose(child, item.path))
-		end
-	end
 	table.sort(children, function(left, right)
 		return left.name < right.name
 	end)
@@ -312,7 +369,10 @@ local function serializePose(pose: Pose, parentPose: string?): Dictionary
 	return item
 end
 
-local function serializeKeyframe(keyframe: Keyframe): Dictionary
+local function serializeKeyframe(
+	keyframe: Keyframe,
+	includeParts: { [string]: boolean }?
+): Dictionary
 	local markers = {}
 	for _, marker in keyframe:GetMarkers() do
 		table.insert(markers, {
@@ -327,7 +387,10 @@ local function serializeKeyframe(keyframe: Keyframe): Dictionary
 	local poses = {}
 	for _, pose in keyframe:GetPoses() do
 		if pose:IsA("Pose") then
-			table.insert(poses, serializePose(pose, nil))
+			local serialized = serializePose(pose, nil, includeParts)
+			if serialized then
+				table.insert(poses, serialized)
+			end
 		end
 	end
 	table.sort(poses, function(left, right)
@@ -427,17 +490,17 @@ local function solveFrame(
 	local frames: { [string]: CFrame } = {
 		[data.root.Name] = CFrame.identity,
 	}
-	local unresolved = table.clone(data.motors)
-	for _ = 1, #data.motors + 1 do
+	local unresolved = table.clone(data.joints)
+	for _ = 1, #data.joints + 1 do
 		local progressed = false
 		for index = #unresolved, 1, -1 do
-			local motor = unresolved[index]
-			local part0 = motor.Part0
-			local part1 = motor.Part1
+			local joint = unresolved[index]
+			local part0 = joint.Part0
+			local part1 = joint.Part1
 			local parentFrame = part0 and frames[part0.Name]
 			if part0 and part1 and parentFrame then
 				local sampled = sampleTrack(tracks[part1.Name], time)
-				frames[part1.Name] = parentFrame * motor.C0 * sampled * motor.C1:Inverse()
+				frames[part1.Name] = parentFrame * joint.C0 * sampled * joint.C1:Inverse()
 				table.remove(unresolved, index)
 				progressed = true
 			end
@@ -695,16 +758,25 @@ end
 
 function Analyzer.inspect(params: Dictionary, context: Context): Dictionary
 	local sequence = resolveSequence(params)
-	local data = rigDataFor(resolveRig(params, sequence, context))
 	local duration = sequenceDuration(sequence)
 	local sampleRate = math.clamp(params.sampleRate or 60, 1, 120)
 	local tracks = collectTrackKeys(sequence)
 	local keyframes = sortedKeyframes(sequence)
-	local rawStart = math.clamp(params.rawStart or 0, 0, math.max(0, #keyframes))
-	local rawCount = math.clamp(params.rawCount or 30, 0, 120)
+	local page = math.max(1, math.floor(params.page or 1))
+	local pageSize = math.clamp(math.floor(params.pageSize or 1), 1, 10)
+	local rawStart = math.clamp(
+		params.rawStart or ((page - 1) * pageSize),
+		0,
+		math.max(0, #keyframes)
+	)
+	local rawCount = math.clamp(params.rawCount or pageSize, 0, 10)
 	local sampleTotal = math.max(1, math.ceil(duration * sampleRate)) + 1
-	local sampleStart = math.clamp(params.sampleStart or 0, 0, sampleTotal)
-	local sampleCount = math.clamp(params.sampleCount or 30, 0, 120)
+	local sampleStart = math.clamp(
+		params.sampleStart or ((page - 1) * pageSize),
+		0,
+		sampleTotal
+	)
+	local sampleCount = math.clamp(params.sampleCount or pageSize, 0, 10)
 	local includeParts: { [string]: boolean }? = nil
 	if type(params.parts) == "table" and #params.parts > 0 then
 		includeParts = {}
@@ -712,9 +784,26 @@ function Analyzer.inspect(params: Dictionary, context: Context): Dictionary
 			includeParts[name] = true
 		end
 	end
+	local includeRig = params.includeRig ~= false
+	local includeRaw = params.includeRaw ~= false
+	local includeSamples = params.includeSamples ~= false
+	local includeMetrics = params.includeMetrics ~= false
+	local needsRig = includeRig or includeSamples or includeMetrics
+	local data: RigData? = nil
+	if needsRig then
+		data = rigDataFor(resolveRig(params, sequence, context))
+	end
 	local result: Dictionary = {
-		format = "motion-director-animation-analysis-v1",
+		format = "motion-director-animation-analysis-v2",
 		sequence = sequenceMetadata(sequence, context),
+		request = {
+			page = page,
+			pageSize = pageSize,
+			includeRig = includeRig,
+			includeRaw = includeRaw,
+			includeSamples = includeSamples,
+			includeMetrics = includeMetrics,
+		},
 		pagination = {
 			raw = {
 				total = #keyframes,
@@ -729,17 +818,20 @@ function Analyzer.inspect(params: Dictionary, context: Context): Dictionary
 			},
 		},
 	}
-	if params.includeRig ~= false then
+	if includeRig and data then
 		result.rig = rigSnapshot(data, context)
 	end
-	if params.includeRaw ~= false and rawCount > 0 then
+	if includeRaw and rawCount > 0 then
 		local raw = {}
 		for index = rawStart + 1, math.min(#keyframes, rawStart + rawCount) do
-			table.insert(raw, serializeKeyframe(keyframes[index]))
+			table.insert(raw, serializeKeyframe(keyframes[index], includeParts))
 		end
 		result.rawKeyframes = raw
 	end
-	if params.includeSamples ~= false and sampleCount > 0 then
+	if includeSamples and sampleCount > 0 then
+		if not data then
+			error("Spatial samples require a selected rig or rigPath.")
+		end
 		local samples = {}
 		for zeroIndex = sampleStart, math.min(sampleTotal - 1, sampleStart + sampleCount - 1) do
 			local time = if sampleTotal > 1 then duration * zeroIndex / (sampleTotal - 1) else 0
@@ -753,7 +845,10 @@ function Analyzer.inspect(params: Dictionary, context: Context): Dictionary
 		end
 		result.sampledFrames = samples
 	end
-	if params.includeMetrics ~= false then
+	if includeMetrics then
+		if not data then
+			error("Spatial metrics require a selected rig or rigPath.")
+		end
 		result.metrics = metricsFor(data, tracks, duration, sampleRate)
 	end
 	return result
@@ -897,13 +992,18 @@ local Selection = game:GetService("Selection")
 local ServerStorage = game:GetService("ServerStorage")
 local StudioService = game:GetService("StudioService")
 local AnimationAnalyzer = require(script.Parent:WaitForChild("AnimationAnalyzer"))
+local R6ToR15Retargeter = require(script.Parent:WaitForChild("R6ToR15Retargeter"))
 
 local LOCAL_BRIDGE_URL = "http://127.0.0.1:34718"
-local PLUGIN_VERSION = "0.3.0"
+local DEFAULT_CHATGPT_RELAY_URL = "https://motion-director-relay.onrender.com"
+local PAIRING_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+local PLUGIN_VERSION = "0.6.0"
 local HEADER = { ["x-roblox-motion-bridge"] = "1", ["content-type"] = "application/json" }
 
 local savedRelayUrl = plugin:GetSetting("MotionDirectorRelayUrl")
-local relayBridgeUrl = if type(savedRelayUrl) == "string" then savedRelayUrl:gsub("/+$", "") else ""
+local relayBridgeUrl = if type(savedRelayUrl) == "string" and savedRelayUrl ~= ""
+	then savedRelayUrl:gsub("/+$", "")
+	else DEFAULT_CHATGPT_RELAY_URL
 local savedMode = plugin:GetSetting("MotionDirectorBridgeMode")
 local bridgeMode = if savedMode == "chatgpt" then "chatgpt" else "local"
 local installationId = plugin:GetSetting("MotionDirectorInstallationId")
@@ -915,9 +1015,38 @@ end
 local sessionId: string? = nil
 local agentToken: string? = nil
 local pairingCode: string? = nil
+local launchId = HttpService:GenerateGUID(false)
+local studioUserId = StudioService:GetUserId()
+local knowledgeRole = "reader"
+
+local function pairingCodeForLaunch(value: string): string
+	local compact = value:gsub("[^%x]", "")
+	local characters = {}
+	for index = 1, 10 do
+		local offset = ((index - 1) * 2) % #compact + 1
+		local byte = tonumber(compact:sub(offset, offset + 1), 16) or index
+		local alphabetIndex = byte % #PAIRING_CODE_ALPHABET + 1
+		table.insert(characters, PAIRING_CODE_ALPHABET:sub(alphabetIndex, alphabetIndex))
+	end
+	local raw = table.concat(characters)
+	return raw:sub(1, 5) .. "-" .. raw:sub(6, 10)
+end
+
+local userCodeSettingKey = "MotionDirectorUserPairingCode:" .. tostring(studioUserId)
+local savedUserPairingCode = plugin:GetSetting(userCodeSettingKey)
+local userPairingCode: string
+if type(savedUserPairingCode) == "string"
+	and savedUserPairingCode:match("^[A-Z2-9][A-Z2-9][A-Z2-9][A-Z2-9][A-Z2-9]%-[A-Z2-9][A-Z2-9][A-Z2-9][A-Z2-9][A-Z2-9]$")
+then
+	userPairingCode = savedUserPairingCode
+else
+	userPairingCode = pairingCodeForLaunch(HttpService:GenerateGUID(false))
+	plugin:SetSetting(userCodeSettingKey, userPairingCode)
+end
 local pollIntervalSeconds = 0.35
 
 type Dictionary = { [string]: any }
+local pendingKnowledgeProposal: Dictionary? = nil
 
 local toolbar = plugin:CreateToolbar("Motion Director")
 local toggleButton = toolbar:CreateButton(
@@ -932,9 +1061,9 @@ local widgetInfo = DockWidgetPluginGuiInfo.new(
 	true,
 	false,
 	340,
-	390,
+	570,
 	280,
-	300
+	470
 )
 local widget = plugin:CreateDockWidgetPluginGui("RobloxMotionDirector", widgetInfo)
 widget.Title = "Motion Director"
@@ -1052,14 +1181,19 @@ local chatGptModeCorner = Instance.new("UICorner")
 chatGptModeCorner.CornerRadius = UDim.new(0, 7)
 chatGptModeCorner.Parent = chatGptModeButton
 
-local pairLabel = Instance.new("TextLabel")
+local pairLabel = Instance.new("TextBox")
 pairLabel.BackgroundColor3 = Color3.fromRGB(29, 32, 40)
 pairLabel.BorderSizePixel = 0
+pairLabel.ClearTextOnFocus = false
 pairLabel.Font = Enum.Font.Code
-pairLabel.Text = "ChatGPT pairing code will appear here"
+pairLabel.MultiLine = true
+pairLabel.Text = "Your ChatGPT connection code will appear here"
 pairLabel.TextColor3 = Color3.fromRGB(160, 169, 193)
+pairLabel.TextEditable = false
 pairLabel.TextSize = 14
 pairLabel.TextWrapped = true
+pairLabel.TextXAlignment = Enum.TextXAlignment.Center
+pairLabel.TextYAlignment = Enum.TextYAlignment.Center
 pairLabel.Size = UDim2.new(1, 0, 0, 42)
 pairLabel.Parent = root
 
@@ -1067,12 +1201,108 @@ local pairCorner = Instance.new("UICorner")
 pairCorner.CornerRadius = UDim.new(0, 7)
 pairCorner.Parent = pairLabel
 
+local developerIdLabel = Instance.new("TextBox")
+developerIdLabel.BackgroundColor3 = Color3.fromRGB(29, 32, 40)
+developerIdLabel.BorderSizePixel = 0
+developerIdLabel.ClearTextOnFocus = false
+developerIdLabel.Font = Enum.Font.Code
+developerIdLabel.MultiLine = true
+developerIdLabel.Text = "DEVELOPMENT INSTALLATION ID\n" .. installationId
+developerIdLabel.TextColor3 = Color3.fromRGB(135, 145, 171)
+developerIdLabel.TextEditable = false
+developerIdLabel.TextSize = 10
+developerIdLabel.TextWrapped = true
+developerIdLabel.TextXAlignment = Enum.TextXAlignment.Center
+developerIdLabel.TextYAlignment = Enum.TextYAlignment.Center
+developerIdLabel.Size = UDim2.new(1, 0, 0, 42)
+developerIdLabel.Parent = root
+
+local developerIdCorner = Instance.new("UICorner")
+developerIdCorner.CornerRadius = UDim.new(0, 7)
+developerIdCorner.Parent = developerIdLabel
+
+local knowledgeLabel = Instance.new("TextLabel")
+knowledgeLabel.BackgroundColor3 = Color3.fromRGB(29, 32, 40)
+knowledgeLabel.BorderSizePixel = 0
+knowledgeLabel.Font = Enum.Font.BuilderSans
+knowledgeLabel.Text = "Global knowledge: read-only"
+knowledgeLabel.TextColor3 = Color3.fromRGB(160, 169, 193)
+knowledgeLabel.TextSize = 12
+knowledgeLabel.TextWrapped = true
+knowledgeLabel.TextXAlignment = Enum.TextXAlignment.Left
+knowledgeLabel.TextYAlignment = Enum.TextYAlignment.Center
+knowledgeLabel.Size = UDim2.new(1, 0, 0, 58)
+knowledgeLabel.Visible = false
+knowledgeLabel.Parent = root
+
+local knowledgeCorner = Instance.new("UICorner")
+knowledgeCorner.CornerRadius = UDim.new(0, 7)
+knowledgeCorner.Parent = knowledgeLabel
+
+local knowledgeButtons = Instance.new("Frame")
+knowledgeButtons.BackgroundTransparency = 1
+knowledgeButtons.Size = UDim2.new(1, 0, 0, 34)
+knowledgeButtons.Visible = false
+knowledgeButtons.Parent = root
+
+local knowledgeButtonsLayout = Instance.new("UIListLayout")
+knowledgeButtonsLayout.FillDirection = Enum.FillDirection.Horizontal
+knowledgeButtonsLayout.Padding = UDim.new(0, 8)
+knowledgeButtonsLayout.Parent = knowledgeButtons
+
+local commitKnowledgeButton = Instance.new("TextButton")
+commitKnowledgeButton.BackgroundColor3 = Color3.fromRGB(47, 117, 82)
+commitKnowledgeButton.BorderSizePixel = 0
+commitKnowledgeButton.Font = Enum.Font.BuilderSansBold
+commitKnowledgeButton.Text = "COMMIT GLOBAL"
+commitKnowledgeButton.TextColor3 = Color3.fromRGB(235, 255, 243)
+commitKnowledgeButton.TextSize = 12
+commitKnowledgeButton.Size = UDim2.new(0.62, -4, 1, 0)
+commitKnowledgeButton.Parent = knowledgeButtons
+
+local commitKnowledgeCorner = Instance.new("UICorner")
+commitKnowledgeCorner.CornerRadius = UDim.new(0, 7)
+commitKnowledgeCorner.Parent = commitKnowledgeButton
+
+local rejectKnowledgeButton = Instance.new("TextButton")
+rejectKnowledgeButton.BackgroundColor3 = Color3.fromRGB(113, 53, 59)
+rejectKnowledgeButton.BorderSizePixel = 0
+rejectKnowledgeButton.Font = Enum.Font.BuilderSansBold
+rejectKnowledgeButton.Text = "REJECT"
+rejectKnowledgeButton.TextColor3 = Color3.fromRGB(255, 235, 237)
+rejectKnowledgeButton.TextSize = 12
+rejectKnowledgeButton.Size = UDim2.new(0.38, -4, 1, 0)
+rejectKnowledgeButton.Parent = knowledgeButtons
+
+local rejectKnowledgeCorner = Instance.new("UICorner")
+rejectKnowledgeCorner.CornerRadius = UDim.new(0, 7)
+rejectKnowledgeCorner.Parent = rejectKnowledgeButton
+
 toggleButton.Click:Connect(function()
 	widget.Enabled = not widget.Enabled
 end)
 
 local running = true
 local activePreviewTracks: { AnimationTrack } = {}
+
+local function updateKnowledgeUi()
+	local developerActive = bridgeMode == "chatgpt" and knowledgeRole == "developer"
+	knowledgeLabel.Visible = developerActive
+	knowledgeButtons.Visible = developerActive and pendingKnowledgeProposal ~= nil
+	if not developerActive then
+		return
+	end
+	if pendingKnowledgeProposal then
+		local titleText = tostring(pendingKnowledgeProposal.title or "Untitled proposal")
+		local principleText = tostring(pendingKnowledgeProposal.principle or "")
+		knowledgeLabel.Text = "PENDING GLOBAL KNOWLEDGE\n"
+			.. titleText:sub(1, 70)
+			.. "\n"
+			.. principleText:sub(1, 150)
+	else
+		knowledgeLabel.Text = "DEVELOPMENT KNOWLEDGE\nNo pending global proposal."
+	end
+end
 
 local function updateModeButtons()
 	local localActive = bridgeMode == "local"
@@ -1084,17 +1314,22 @@ local function updateModeButtons()
 		else Color3.fromRGB(67, 96, 154)
 	relayUrlBox.Visible = not localActive
 	pairLabel.Visible = not localActive
+	developerIdLabel.Visible = not localActive
 	explanation.Text = if localActive
 		then "Local MCP bridge. Drafts remain reversible until an explicit commit."
-		else "Remote GPT Action bridge. Share only the temporary pairing code shown below."
+		else "Remote GPT Action bridge. Treat the personal connection code below as a secret."
+	updateKnowledgeUi()
 end
 
 local function resetConnection()
 	sessionId = nil
 	agentToken = nil
 	pairingCode = nil
+	knowledgeRole = "reader"
+	pendingKnowledgeProposal = nil
 	pollIntervalSeconds = if bridgeMode == "local" then 0.35 else 0.5
 	pairLabel.Text = "Connecting to ChatGPT relay..."
+	updateKnowledgeUi()
 end
 
 localModeButton.MouseButton1Click:Connect(function()
@@ -1157,6 +1392,49 @@ local function request(path: string, body: Dictionary): (boolean, any)
 	end
 	return true, decoded
 end
+
+local function resolvePendingKnowledge(decision: string)
+	if not pendingKnowledgeProposal or not sessionId or not agentToken then
+		return
+	end
+	local proposalId = pendingKnowledgeProposal.id
+	if type(proposalId) ~= "string" then
+		return
+	end
+	commitKnowledgeButton.Active = false
+	rejectKnowledgeButton.Active = false
+	knowledgeLabel.Text = if decision == "commit"
+		then "Publishing global knowledge..."
+		else "Rejecting knowledge proposal..."
+	task.spawn(function()
+		local ok, result = request("/plugin/knowledge/resolve", {
+			sessionId = sessionId,
+			agentToken = agentToken,
+			proposalId = proposalId,
+			decision = decision,
+		})
+		commitKnowledgeButton.Active = true
+		rejectKnowledgeButton.Active = true
+		if ok then
+			pendingKnowledgeProposal = nil
+			knowledgeLabel.Text = if decision == "commit"
+				then "GLOBAL KNOWLEDGE PUBLISHED\nVersion " .. tostring(result.snapshot and result.snapshot.version or "?")
+				else "KNOWLEDGE PROPOSAL REJECTED"
+			task.delay(2, updateKnowledgeUi)
+		else
+			knowledgeLabel.Text = "KNOWLEDGE UPDATE FAILED\n" .. tostring(result)
+		end
+		knowledgeButtons.Visible = false
+	end)
+end
+
+commitKnowledgeButton.MouseButton1Click:Connect(function()
+	resolvePendingKnowledge("commit")
+end)
+
+rejectKnowledgeButton.MouseButton1Click:Connect(function()
+	resolvePendingKnowledge("reject")
+end)
 
 local function pathOf(instance: Instance): string
 	local pieces = {}
@@ -1306,6 +1584,7 @@ local function inspectRig(params: Dictionary): Dictionary
 				path = pathOf(descendant),
 				parentPart = descendant.Part0 and descendant.Part0.Name or nil,
 				childPart = descendant.Part1 and descendant.Part1.Name or nil,
+				trackName = descendant.Part1 and descendant.Part1.Name or descendant.Name,
 				c0 = transform(descendant.C0),
 				c1 = transform(descendant.C1),
 				currentTransform = transform(descendant.Transform),
@@ -1316,11 +1595,30 @@ local function inspectRig(params: Dictionary): Dictionary
 				path = pathOf(descendant),
 				parentPart = descendant.Part0 and descendant.Part0.Name or nil,
 				childPart = descendant.Part1 and descendant.Part1.Name or nil,
+				trackName = descendant.Part1 and descendant.Part1.Name or descendant.Name,
 				c0 = transform(descendant.C0),
 				c1 = transform(descendant.C1),
 				currentTransform = transform(descendant.Transform),
 				isKinematic = descendant.IsKinematic,
+				attachment0 = descendant.Attachment0 and {
+					name = descendant.Attachment0.Name,
+					path = pathOf(descendant.Attachment0),
+					cframe = transform(descendant.Attachment0.CFrame),
+				} or nil,
+				attachment1 = descendant.Attachment1 and {
+					name = descendant.Attachment1.Name,
+					path = pathOf(descendant.Attachment1),
+					cframe = transform(descendant.Attachment1.CFrame),
+				} or nil,
 			})
+			if not descendant.IsKinematic then
+				table.insert(
+					warnings,
+					"AnimationConstraint "
+						.. descendant.Name
+						.. " is force-driven (IsKinematic=false); authored transforms may physically lag."
+				)
+			end
 		elseif descendant:IsA("Bone") then
 			table.insert(bones, {
 				name = descendant.Name,
@@ -1344,12 +1642,29 @@ local function inspectRig(params: Dictionary): Dictionary
 	if #motors == 0 and #animationConstraints == 0 and #bones == 0 then
 		table.insert(warnings, "The selected model has no Motor6D, AnimationConstraint, or Bone joints.")
 	end
+	if #motors > 0 and #animationConstraints > 0 then
+		table.insert(
+			warnings,
+			"The selected rig has a hybrid Motor6D/AnimationConstraint topology; use each joint's reported trackName and basis."
+		)
+	end
 
 	local humanoid = rig:FindFirstChildOfClass("Humanoid")
+	local jointSystem = if #animationConstraints > 0 and #motors > 0
+		then "Hybrid"
+		elseif #animationConstraints > 0
+		then "AnimationConstraint"
+		elseif #motors > 0
+		then "Motor6D"
+		elseif #bones > 0
+		then "Bone"
+		else "None"
 	return {
 		id = pathOf(rig),
 		name = rig.Name,
 		rigType = humanoid and humanoid.RigType.Name or "Custom",
+		jointSystem = jointSystem,
+		avatarJointUpgrade = #animationConstraints > 0,
 		scale = humanoid and {
 			hipHeight = humanoid.HipHeight,
 		} or nil,
@@ -1568,8 +1883,9 @@ local handlers: { [string]: (Dictionary) -> any } = {}
 handlers["system.capabilities"] = function(_params)
 	return {
 		pluginVersion = PLUGIN_VERSION,
-		parentSpaceBakerVersion = 6,
-		animationAnalyzerVersion = 1,
+		parentSpaceBakerVersion = 7,
+		animationAnalyzerVersion = 2,
+		r6ToR15RetargeterVersion = 1,
 		autoCreateAnimator = true,
 		synchronizedMultiRig = true,
 		isRunning = RunService:IsRunning(),
@@ -1604,6 +1920,43 @@ end
 
 handlers["analysis.compareAnimations"] = function(params)
 	return AnimationAnalyzer.compare(params, analyzerContext)
+end
+
+handlers["animation.stageR6ToR15Retarget"] = function(params)
+	return withRecording("Stage R6 to R15 world-space retarget", function()
+		local result = R6ToR15Retargeter.convert(params, {
+			pathOf = pathOf,
+			selectedRigs = selectedRigs,
+		})
+		local drafts = ensureFolder(ServerStorage, "MotionDirectorDrafts")
+		local transactionId = HttpService:GenerateGUID(false)
+		local transaction = Instance.new("Folder")
+		transaction.Name = transactionId
+		transaction:SetAttribute("TransactionName", params.transactionName)
+		transaction:SetAttribute("RigPath", pathOf(result.targetRig))
+		transaction:SetAttribute("RetargetMethod", result.method)
+		transaction:SetAttribute("CreatedAt", os.time())
+		transaction.Parent = drafts
+		local targetRig = Instance.new("ObjectValue")
+		targetRig.Name = "TargetRig"
+		targetRig.Value = result.targetRig
+		targetRig.Parent = transaction
+		result.sequence.Parent = transaction
+		return {
+			transactionId = transactionId,
+			sequencePath = pathOf(result.sequence),
+			sourceAnimation = pathOf(result.sourceSequence),
+			sourceRig = pathOf(result.sourceRig),
+			targetRig = pathOf(result.targetRig),
+			keyframeCount = result.keyframeCount,
+			convertedPoseCount = result.convertedPoseCount,
+			markerCount = result.markerCount,
+			method = result.method,
+			legLateralScale = result.legLateralScale,
+			maxLegLateralOffset = result.maxLegLateralOffset,
+			status = "staged",
+		}
+	end)
 end
 
 handlers["scene.createTestRig"] = function(params)
@@ -2599,7 +2952,9 @@ end
 local function connect(): boolean
 	local ok, result = request("/plugin/connect", {
 		installationId = installationId,
-		studioUserId = StudioService:GetUserId(),
+		launchId = launchId,
+		pairingCode = userPairingCode,
+		studioUserId = studioUserId,
 		placeId = game.PlaceId,
 		placeName = game.Name,
 		pluginVersion = PLUGIN_VERSION,
@@ -2620,18 +2975,20 @@ local function connect(): boolean
 	sessionId = result.sessionId
 	agentToken = result.agentToken
 	pairingCode = result.pairingCode
+	knowledgeRole = if result.knowledgeRole == "developer" then "developer" else "reader"
 	if type(result.pollIntervalMs) == "number" then
 		pollIntervalSeconds = math.clamp(result.pollIntervalMs / 1000, 0.2, 3)
 	end
 	status.Text = if bridgeMode == "local"
 		then "Connected locally\nReady for MCP animation direction."
-		else "Connected to ChatGPT\nUse the pairing code below."
+		else "Connected to ChatGPT\nUse your personal code below."
 	status.TextColor3 = Color3.fromRGB(113, 231, 163)
 	if bridgeMode == "chatgpt" then
 		pairLabel.Text = if type(pairingCode) == "string"
-			then "PAIRING CODE\n" .. pairingCode
+			then "USER CODE\n" .. pairingCode
 			else "Relay did not return a pairing code"
 	end
+	updateKnowledgeUi()
 	return true
 end
 
@@ -2670,6 +3027,14 @@ task.spawn(function()
 			task.wait(1)
 			continue
 		end
+		if knowledgeRole == "developer" then
+			if type(response.pendingKnowledge) == "table" then
+				pendingKnowledgeProposal = response.pendingKnowledge
+			elseif response.pendingKnowledge == nil then
+				pendingKnowledgeProposal = nil
+			end
+			updateKnowledgeUi()
+		end
 		local command = response.command
 		if command then
 			local handler = handlers[command.method]
@@ -2687,6 +3052,529 @@ end)
 plugin.Unloading:Connect(function()
 	running = false
 end)
+]]></string>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="3">
+      <Properties>
+        <string name="Name">R6ToR15Retargeter</string>
+        <string name="Source"><![CDATA[--!strict
+
+local Selection = game:GetService("Selection")
+
+type Dictionary = { [string]: any }
+type AnimationJoint = Motor6D | AnimationConstraint
+type JointData = {
+	joint: AnimationJoint,
+	parentName: string,
+	childName: string,
+}
+type RigData = {
+	rig: Model,
+	root: BasePart,
+	joints: { JointData },
+	jointByChild: { [string]: JointData },
+	childrenByParent: { [string]: { JointData } },
+	parts: { [string]: BasePart },
+}
+type PoseState = {
+	cframe: CFrame,
+	weight: number,
+	easingStyle: Enum.PoseEasingStyle,
+	easingDirection: Enum.PoseEasingDirection,
+}
+type Context = {
+	pathOf: (Instance) -> string,
+	selectedRigs: () -> { Model },
+}
+
+local Retargeter = {}
+
+local JOINT_MAP = {
+	Torso = "LowerTorso",
+	Head = "Head",
+	["Left Arm"] = "LeftUpperArm",
+	["Right Arm"] = "RightUpperArm",
+	["Left Leg"] = "LeftUpperLeg",
+	["Right Leg"] = "RightUpperLeg",
+}
+
+local TARGET_BODY_PARTS = {
+	LowerTorso = true,
+	UpperTorso = true,
+	Head = true,
+	LeftUpperArm = true,
+	LeftLowerArm = true,
+	LeftHand = true,
+	RightUpperArm = true,
+	RightLowerArm = true,
+	RightHand = true,
+	LeftUpperLeg = true,
+	LeftLowerLeg = true,
+	LeftFoot = true,
+	RightUpperLeg = true,
+	RightLowerLeg = true,
+	RightFoot = true,
+}
+
+local function resolveByPath(path: string, className: string?): Instance?
+	for _, descendant in game:GetDescendants() do
+		if descendant:GetFullName() == path and (not className or descendant:IsA(className)) then
+			return descendant
+		end
+	end
+	return nil
+end
+
+local function resolveSequence(params: Dictionary): KeyframeSequence
+	if type(params.sourcePath) == "string" and params.sourcePath ~= "" then
+		local result = resolveByPath(params.sourcePath, "KeyframeSequence")
+		if result and result:IsA("KeyframeSequence") then
+			return result
+		end
+		error("Source KeyframeSequence was not found at path: " .. params.sourcePath)
+	end
+	if type(params.animationName) == "string" and params.animationName ~= "" then
+		local occurrence = math.max(1, math.floor(params.occurrence or 1))
+		local candidates = {}
+		for _, descendant in game:GetDescendants() do
+			if descendant:IsA("KeyframeSequence") and descendant.Name == params.animationName then
+				table.insert(candidates, descendant)
+			end
+		end
+		table.sort(candidates, function(left, right)
+			return left:GetFullName() < right:GetFullName()
+		end)
+		local result = candidates[occurrence]
+		if result then
+			return result
+		end
+		error("Source KeyframeSequence was not found by name: " .. params.animationName)
+	end
+	error("Provide sourcePath or animationName for R6 to R15 retargeting.")
+end
+
+local function nearestRig(source: Instance): Model?
+	local cursor: Instance? = source.Parent
+	while cursor do
+		if cursor:IsA("Model")
+			and (cursor:FindFirstChildOfClass("Humanoid") or cursor:FindFirstChildOfClass("AnimationController"))
+		then
+			return cursor
+		end
+		cursor = cursor.Parent
+	end
+	return nil
+end
+
+local function rigAtPath(path: any): Model?
+	if type(path) ~= "string" or path == "" then
+		return nil
+	end
+	local result = resolveByPath(path, "Model")
+	return if result and result:IsA("Model") then result else nil
+end
+
+local function resolveRigs(
+	params: Dictionary,
+	sequence: KeyframeSequence,
+	context: Context
+): (Model, Model)
+	local selected = context.selectedRigs()
+	local sourceRig = rigAtPath(params.sourceRigPath) or nearestRig(sequence)
+	if not sourceRig then
+		local index = math.max(1, math.floor(params.sourceSelectionIndex or 1))
+		sourceRig = selected[index]
+	end
+	if not sourceRig then
+		error("Select the source R6 rig or provide sourceRigPath.")
+	end
+
+	local targetRig = rigAtPath(params.targetRigPath)
+	if not targetRig then
+		local index = math.max(1, math.floor(params.targetSelectionIndex or 2))
+		targetRig = selected[index]
+	end
+	if not targetRig then
+		for _, candidate in selected do
+			if candidate ~= sourceRig then
+				targetRig = candidate
+				break
+			end
+		end
+	end
+	if not targetRig then
+		error("Select the target R15 rig together with the source rig or provide targetRigPath.")
+	end
+	if sourceRig == targetRig then
+		error("Source and target rigs must be different Models.")
+	end
+	return sourceRig, targetRig
+end
+
+local function assertRigType(rig: Model, expected: Enum.HumanoidRigType, label: string)
+	local humanoid = rig:FindFirstChildOfClass("Humanoid")
+	if not humanoid or humanoid.RigType ~= expected then
+		error(label .. " must be a " .. expected.Name .. " Humanoid rig: " .. rig:GetFullName())
+	end
+end
+
+local function rigDataFor(rig: Model): RigData
+	local root = rig:FindFirstChild("HumanoidRootPart", true) or rig.PrimaryPart
+	if not root or not root:IsA("BasePart") then
+		error("Rig has no HumanoidRootPart or PrimaryPart: " .. rig:GetFullName())
+	end
+	local parts: { [string]: BasePart } = {}
+	local joints = {}
+	local jointByChild = {}
+	local childrenByParent = {}
+	for _, descendant in rig:GetDescendants() do
+		if descendant:IsA("BasePart") then
+			parts[descendant.Name] = descendant
+		elseif
+			(descendant:IsA("Motor6D") or descendant:IsA("AnimationConstraint"))
+			and descendant.Part0
+			and descendant.Part1
+		then
+			local joint = descendant :: AnimationJoint
+			local data: JointData = {
+				joint = joint,
+				parentName = joint.Part0.Name,
+				childName = joint.Part1.Name,
+			}
+			table.insert(joints, data)
+			jointByChild[data.childName] = data
+			childrenByParent[data.parentName] = childrenByParent[data.parentName] or {}
+			table.insert(childrenByParent[data.parentName], data)
+		end
+	end
+	for _, children in childrenByParent do
+		table.sort(children, function(left, right)
+			return left.childName < right.childName
+		end)
+	end
+	return {
+		rig = rig,
+		root = root,
+		joints = joints,
+		jointByChild = jointByChild,
+		childrenByParent = childrenByParent,
+		parts = parts,
+	}
+end
+
+local function verifyRequiredParts(data: RigData, names: { string }, label: string)
+	for _, name in names do
+		if not data.parts[name] then
+			error(label .. " is missing required body part: " .. name)
+		end
+		if name ~= data.root.Name and not data.jointByChild[name] then
+			error(label .. " is missing an animation joint for body part: " .. name)
+		end
+	end
+end
+
+local function identityState(): PoseState
+	return {
+		cframe = CFrame.identity,
+		weight = 1,
+		easingStyle = Enum.PoseEasingStyle.Cubic,
+		easingDirection = Enum.PoseEasingDirection.InOut,
+	}
+end
+
+local function collectPoseState(pose: Pose, state: { [string]: PoseState })
+	state[pose.Name] = {
+		cframe = pose.CFrame,
+		weight = pose.Weight,
+		easingStyle = pose.EasingStyle,
+		easingDirection = pose.EasingDirection,
+	}
+	for _, child in pose:GetSubPoses() do
+		if child:IsA("Pose") then
+			collectPoseState(child, state)
+		end
+	end
+end
+
+local function solveWorld(
+	data: RigData,
+	transforms: { [string]: CFrame },
+	rootWorld: CFrame?
+): { [string]: CFrame }
+	local world = { [data.root.Name] = rootWorld or data.root.CFrame }
+	local pending = table.clone(data.joints)
+	while #pending > 0 do
+		local progressed = false
+		for index = #pending, 1, -1 do
+			local item = pending[index]
+			local parentWorld = world[item.parentName]
+			if parentWorld then
+				local transform = transforms[item.childName] or CFrame.identity
+				world[item.childName] =
+					parentWorld * item.joint.C0 * transform * item.joint.C1:Inverse()
+				table.remove(pending, index)
+				progressed = true
+			end
+		end
+		if not progressed then
+			error("Rig joint hierarchy is disconnected beneath " .. data.root.Name .. ".")
+		end
+	end
+	return world
+end
+
+local function convertedNeutralByTarget(
+	source: RigData,
+	target: RigData
+): { [string]: CFrame }
+	local sourceNeutral = solveWorld(source, {}, source.root.CFrame)
+	local targetNeutral = solveWorld(target, {}, target.root.CFrame)
+	local result = {}
+	for sourceName, targetName in JOINT_MAP do
+		local desired =
+			target.root.CFrame * source.root.CFrame:Inverse() * sourceNeutral[sourceName]
+		local targetJoint = target.jointByChild[targetName]
+		local parentWorld = targetNeutral[targetJoint.parentName]
+		result[targetName] =
+			targetJoint.joint.C0:Inverse()
+			* parentWorld:Inverse()
+			* desired
+			* targetJoint.joint.C1
+	end
+	return result
+end
+
+local function sourceNameForTarget(targetName: string): string?
+	for sourceName, mappedTarget in JOINT_MAP do
+		if mappedTarget == targetName then
+			return sourceName
+		end
+	end
+	return nil
+end
+
+local function applyLegLateralScale(value: CFrame, scale: number, maximum: number): CFrame
+	local position = value.Position
+	local x = math.clamp(position.X * scale, -maximum, maximum)
+	return CFrame.new(x, position.Y, position.Z) * value.Rotation
+end
+
+local function convertFrame(
+	source: RigData,
+	target: RigData,
+	state: { [string]: PoseState },
+	neutral: { [string]: CFrame },
+	legLateralScale: number,
+	maxLegLateralOffset: number
+): ({ [string]: CFrame }, { [string]: PoseState })
+	local sourceTransforms = {}
+	for partName, poseState in state do
+		sourceTransforms[partName] = poseState.cframe
+	end
+	local sourceWorld = solveWorld(source, sourceTransforms, source.root.CFrame)
+	local targetTransforms = {}
+	local targetMetadata = {}
+	local targetWorld = { [target.root.Name] = target.root.CFrame }
+	local pending = table.clone(target.joints)
+
+	while #pending > 0 do
+		local progressed = false
+		for index = #pending, 1, -1 do
+			local item = pending[index]
+			local parentWorld = targetWorld[item.parentName]
+			if parentWorld then
+				local final = CFrame.identity
+				local sourceName = sourceNameForTarget(item.childName)
+				if sourceName then
+					local desired =
+						target.root.CFrame * source.root.CFrame:Inverse() * sourceWorld[sourceName]
+					local converted =
+						item.joint.C0:Inverse()
+						* parentWorld:Inverse()
+						* desired
+						* item.joint.C1
+					final = neutral[item.childName]:Inverse() * converted
+					if item.childName == "LeftUpperLeg" or item.childName == "RightUpperLeg" then
+						final = applyLegLateralScale(
+							final,
+							legLateralScale,
+							maxLegLateralOffset
+						)
+					end
+					targetMetadata[item.childName] = state[sourceName] or identityState()
+				else
+					targetMetadata[item.childName] = identityState()
+				end
+				targetTransforms[item.childName] = final
+				targetWorld[item.childName] =
+					parentWorld * item.joint.C0 * final * item.joint.C1:Inverse()
+				table.remove(pending, index)
+				progressed = true
+			end
+		end
+		if not progressed then
+			error("Target R15 joint hierarchy is disconnected beneath " .. target.root.Name .. ".")
+		end
+	end
+	return targetTransforms, targetMetadata
+end
+
+local function addTargetPoseTree(
+	parent: Instance,
+	parentPartName: string,
+	target: RigData,
+	transforms: { [string]: CFrame },
+	metadata: { [string]: PoseState }
+)
+	for _, item in target.childrenByParent[parentPartName] or {} do
+		if TARGET_BODY_PARTS[item.childName] then
+			local pose = Instance.new("Pose")
+			pose.Name = item.childName
+			pose.CFrame = transforms[item.childName] or CFrame.identity
+			local poseState = metadata[item.childName] or identityState()
+			pose.Weight = poseState.weight
+			pose.EasingStyle = poseState.easingStyle
+			pose.EasingDirection = poseState.easingDirection
+			pose.Parent = parent
+			addTargetPoseTree(pose, item.childName, target, transforms, metadata)
+		end
+	end
+end
+
+local function sortedKeyframes(sequence: KeyframeSequence): { Keyframe }
+	local keyframes = sequence:GetKeyframes()
+	table.sort(keyframes, function(left, right)
+		if math.abs(left.Time - right.Time) > 1e-7 then
+			return left.Time < right.Time
+		end
+		return left.Name < right.Name
+	end)
+	return keyframes
+end
+
+local function markerCount(sequence: KeyframeSequence): number
+	local count = 0
+	for _, descendant in sequence:GetDescendants() do
+		if descendant:IsA("KeyframeMarker") or descendant:IsA("StringValue") then
+			count += 1
+		end
+	end
+	return count
+end
+
+function Retargeter.convert(params: Dictionary, context: Context): Dictionary
+	local sourceSequence = resolveSequence(params)
+	local sourceRig, targetRig = resolveRigs(params, sourceSequence, context)
+	assertRigType(sourceRig, Enum.HumanoidRigType.R6, "Source rig")
+	assertRigType(targetRig, Enum.HumanoidRigType.R15, "Target rig")
+
+	local source = rigDataFor(sourceRig)
+	local target = rigDataFor(targetRig)
+	verifyRequiredParts(source, {
+		"HumanoidRootPart",
+		"Torso",
+		"Head",
+		"Left Arm",
+		"Right Arm",
+		"Left Leg",
+		"Right Leg",
+	}, "Source R6 rig")
+	verifyRequiredParts(target, {
+		"HumanoidRootPart",
+		"LowerTorso",
+		"UpperTorso",
+		"Head",
+		"LeftUpperArm",
+		"LeftLowerArm",
+		"LeftHand",
+		"RightUpperArm",
+		"RightLowerArm",
+		"RightHand",
+		"LeftUpperLeg",
+		"LeftLowerLeg",
+		"LeftFoot",
+		"RightUpperLeg",
+		"RightLowerLeg",
+		"RightFoot",
+	}, "Target R15 rig")
+
+	local legLateralScale = math.clamp(params.legLateralScale or 0.4, 0, 1)
+	local maxLegLateralOffset = math.clamp(params.maxLegLateralOffset or 0.12, 0, 1)
+	local neutral = convertedNeutralByTarget(source, target)
+	local sequence = sourceSequence:Clone()
+	sequence.Name = params.outputName or (sourceSequence.Name .. "_R15")
+	sequence:SetAttribute("MotionDirectorRetargetMethod", "R6WorldToR15LocalV1")
+	sequence:SetAttribute("MotionDirectorSourceAnimation", context.pathOf(sourceSequence))
+	sequence:SetAttribute("MotionDirectorSourceRig", context.pathOf(sourceRig))
+	sequence:SetAttribute("MotionDirectorTargetRig", context.pathOf(targetRig))
+	sequence:SetAttribute("MotionDirectorPreservesPartialPoseInheritance", true)
+	sequence:SetAttribute("MotionDirectorRebasedAgainstNeutral", true)
+	sequence:SetAttribute("MotionDirectorRigidR15Chains", true)
+	sequence:SetAttribute("MotionDirectorLegLateralScale", legLateralScale)
+
+	local state: { [string]: PoseState } = {}
+	for _, name in {
+		source.root.Name,
+		"Torso",
+		"Head",
+		"Left Arm",
+		"Right Arm",
+		"Left Leg",
+		"Right Leg",
+	} do
+		state[name] = identityState()
+	end
+
+	local convertedPoseCount = 0
+	for _, keyframe in sortedKeyframes(sequence) do
+		for _, child in keyframe:GetChildren() do
+			if child:IsA("Pose") then
+				collectPoseState(child, state)
+			end
+		end
+		for _, child in keyframe:GetChildren() do
+			if child:IsA("Pose") then
+				child:Destroy()
+			end
+		end
+		local transforms, metadata = convertFrame(
+			source,
+			target,
+			state,
+			neutral,
+			legLateralScale,
+			maxLegLateralOffset
+		)
+		local rootPose = Instance.new("Pose")
+		rootPose.Name = target.root.Name
+		local sourceRootState = state[source.root.Name] or identityState()
+		rootPose.CFrame = sourceRootState.cframe
+		rootPose.Weight = sourceRootState.weight
+		rootPose.EasingStyle = sourceRootState.easingStyle
+		rootPose.EasingDirection = sourceRootState.easingDirection
+		rootPose.Parent = keyframe
+		addTargetPoseTree(rootPose, target.root.Name, target, transforms, metadata)
+		for _ in transforms do
+			convertedPoseCount += 1
+		end
+	end
+
+	return {
+		sequence = sequence,
+		targetRig = targetRig,
+		sourceRig = sourceRig,
+		sourceSequence = sourceSequence,
+		keyframeCount = #sequence:GetKeyframes(),
+		convertedPoseCount = convertedPoseCount,
+		markerCount = markerCount(sequence),
+		method = "R6WorldToR15LocalV1",
+		legLateralScale = legLateralScale,
+		maxLegLateralOffset = maxLegLateralOffset,
+	}
+end
+
+return Retargeter
 ]]></string>
       </Properties>
     </Item>

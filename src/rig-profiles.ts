@@ -28,11 +28,11 @@ export const R6_PROFILE: RigAuthoringProfile = {
     ...sharedPrinciples,
     "R6 limbs are rigid. Never imply an elbow, wrist, knee, or ankle bend that the topology cannot perform.",
     "Create force through whole-body lean, torso yaw, shoulder arcs, hip counter-rotation, timing, and silhouette.",
-    "Keep R6 limb translation near zero for locomotion so every limb preserves its real shoulder or hip pivot.",
+    "Begin R6 locomotion with limb translation near zero, then allow calibrated local offsets only when they improve silhouette, foot continuity, or proportion while preserving a visibly connected shoulder or hip pivot.",
     "Combat has a wider motion envelope: combine purposeful limb displacement with rotation, torso drive, and a continuous action arc to sell reach and impact.",
     "Never reuse locomotion displacement limits for an anime skill; validate attacking, supporting, and recovering phases by their different roles.",
     "Extreme anime attacks may move a rigid limb roughly a full stud when the silhouette, support axis, torso counter-motion, and recovery arc all justify it.",
-    "Favor fewer, clearer extremes and controlled holds over dense pseudo-mocap.",
+    "Favor fewer, clearer artistic decisions and controlled holds; dense output is valid when it samples an already-designed mocap-like curve rather than inventing noise.",
   ],
   jointGuidance: {
     Torso: {

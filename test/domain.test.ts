@@ -143,3 +143,50 @@ test("uses a wider displacement envelope for intentional R6 combat", () => {
   assert.equal(metric?.severity, "info");
   assert.equal(metric?.score, 1);
 });
+
+test("uses a contextual displacement envelope for R6 locomotion", () => {
+  const draft = animationDraftSchema.parse({
+    name: "R6 authored walk",
+    rigId: "Workspace.Rig",
+    duration: 1,
+    framesPerSecond: 60,
+    looped: true,
+    priority: "movement",
+    beats: [{
+      id: "cycle",
+      label: "Walk cycle",
+      startTime: 0,
+      endTime: 1,
+      intention: "Transfer weight through a grounded step",
+      energy: 0.5,
+    }],
+    contacts: [],
+    tracks: [{
+      joint: "Left Leg",
+      space: "parent",
+      keys: [
+        { time: 0, transform: identity, easing: { style: "linear", direction: "in" } },
+        {
+          time: 0.5,
+          transform: {
+            position: { x: 0.18, y: 0.08, z: -0.38 },
+            rotation: { x: 0, y: 0, z: 0, w: 1 },
+          },
+          easing: { style: "linear", direction: "in" },
+        },
+      ],
+    }],
+    metadata: {
+      intent: "Reference-informed R6 locomotion",
+      rigType: "R6",
+      style: ["grounded", "locomotion"],
+      version: 1,
+    },
+  });
+
+  const metric = reviewDraft(draft).metrics.find(
+    (candidate) => candidate.name === "r6_locomotion_displacement_envelope",
+  );
+  assert.equal(metric?.severity, "info");
+  assert.equal(metric?.score, 1);
+});

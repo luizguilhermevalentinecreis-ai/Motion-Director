@@ -18,11 +18,13 @@ type PoseSample = {
 	easingStyle: string,
 	easingDirection: string,
 }
+type AnimationJoint = Motor6D | AnimationConstraint
 type RigData = {
 	rig: Model,
 	root: BasePart,
-	motors: { Motor6D },
-	motorByPart: { [string]: Motor6D },
+	joints: { AnimationJoint },
+	jointByPart: { [string]: AnimationJoint },
+	jointSystem: string,
 	parts: { [string]: BasePart },
 	animatedParts: { string },
 }
@@ -205,21 +207,33 @@ local function rigDataFor(rig: Model): RigData
 	if not root or not root:IsA("BasePart") then
 		error("Rig has no HumanoidRootPart or PrimaryPart: " .. rig:GetFullName())
 	end
-	local motors = {}
-	local motorByPart = {}
+	local joints: { AnimationJoint } = {}
+	local jointByPart: { [string]: AnimationJoint } = {}
+	local motorCount = 0
+	local animationConstraintCount = 0
 	local parts = {}
 	local animatedSet = { [root.Name] = true }
 	for _, descendant in rig:GetDescendants() do
 		if descendant:IsA("BasePart") then
 			parts[descendant.Name] = descendant
-		elseif descendant:IsA("Motor6D") and descendant.Part0 and descendant.Part1 then
-			table.insert(motors, descendant)
-			motorByPart[descendant.Part1.Name] = descendant
+		elseif
+			(descendant:IsA("Motor6D") or descendant:IsA("AnimationConstraint"))
+			and descendant.Part0
+			and descendant.Part1
+		then
+			local joint = descendant :: AnimationJoint
+			table.insert(joints, joint)
+			jointByPart[joint.Part1.Name] = joint
+			if joint:IsA("Motor6D") then
+				motorCount += 1
+			else
+				animationConstraintCount += 1
+			end
 			animatedSet[descendant.Part0.Name] = true
 			animatedSet[descendant.Part1.Name] = true
 		end
 	end
-	table.sort(motors, function(left, right)
+	table.sort(joints, function(left, right)
 		return left:GetFullName() < right:GetFullName()
 	end)
 	local animatedParts = {}
@@ -229,11 +243,19 @@ local function rigDataFor(rig: Model): RigData
 		end
 	end
 	table.sort(animatedParts)
+	local jointSystem = if animationConstraintCount > 0 and motorCount > 0
+		then "Hybrid"
+		elseif animationConstraintCount > 0
+		then "AnimationConstraint"
+		elseif motorCount > 0
+		then "Motor6D"
+		else "None"
 	return {
 		rig = rig,
 		root = root,
-		motors = motors,
-		motorByPart = motorByPart,
+		joints = joints,
+		jointByPart = jointByPart,
+		jointSystem = jointSystem,
 		parts = parts,
 		animatedParts = animatedParts,
 	}
@@ -242,16 +264,37 @@ end
 local function rigSnapshot(data: RigData, context: Context): Dictionary
 	local humanoid = data.rig:FindFirstChildOfClass("Humanoid")
 	local motors = {}
-	for _, motor in data.motors do
-		table.insert(motors, {
-			name = motor.Name,
-			path = context.pathOf(motor),
-			part0 = motor.Part0 and motor.Part0.Name or nil,
-			part1 = motor.Part1 and motor.Part1.Name or nil,
-			c0 = transform(motor.C0),
-			c1 = transform(motor.C1),
-			restTransform = transform(motor.Transform),
-		})
+	local animationConstraints = {}
+	local animationJoints = {}
+	for _, joint in data.joints do
+		local item: Dictionary = {
+			name = joint.Name,
+			className = joint.ClassName,
+			path = context.pathOf(joint),
+			part0 = joint.Part0 and joint.Part0.Name or nil,
+			part1 = joint.Part1 and joint.Part1.Name or nil,
+			trackName = joint.Part1 and joint.Part1.Name or joint.Name,
+			c0 = transform(joint.C0),
+			c1 = transform(joint.C1),
+			restTransform = transform(joint.Transform),
+		}
+		if joint:IsA("AnimationConstraint") then
+			item.attachment0 = joint.Attachment0 and {
+				name = joint.Attachment0.Name,
+				path = context.pathOf(joint.Attachment0),
+				cframe = transform(joint.Attachment0.CFrame),
+			} or nil
+			item.attachment1 = joint.Attachment1 and {
+				name = joint.Attachment1.Name,
+				path = context.pathOf(joint.Attachment1),
+				cframe = transform(joint.Attachment1.CFrame),
+			} or nil
+			item.isKinematic = joint.IsKinematic
+			table.insert(animationConstraints, item)
+		else
+			table.insert(motors, item)
+		end
+		table.insert(animationJoints, item)
 	end
 	local parts = {}
 	for _, name in data.animatedParts do
@@ -268,16 +311,36 @@ local function rigSnapshot(data: RigData, context: Context): Dictionary
 		name = data.rig.Name,
 		rigType = humanoid and humanoid.RigType.Name or "Custom",
 		rootPart = data.root.Name,
+		jointSystem = data.jointSystem,
+		animationJoints = animationJoints,
 		motors = motors,
+		animationConstraints = animationConstraints,
 		parts = parts,
 		attributes = attributes(data.rig),
 	}
 end
 
-local function serializePose(pose: Pose, parentPose: string?): Dictionary
+local function serializePose(
+	pose: Pose,
+	parentPose: string?,
+	includeParts: { [string]: boolean }?
+): Dictionary?
+	local posePath = if parentPose then parentPose .. "/" .. pose.Name else pose.Name
+	local children = {}
+	for _, child in pose:GetSubPoses() do
+		if child:IsA("Pose") then
+			local serialized = serializePose(child, posePath, includeParts)
+			if serialized then
+				table.insert(children, serialized)
+			end
+		end
+	end
+	if includeParts and not includeParts[pose.Name] and #children == 0 then
+		return nil
+	end
 	local item: Dictionary = {
 		name = pose.Name,
-		path = if parentPose then parentPose .. "/" .. pose.Name else pose.Name,
+		path = posePath,
 		parentPose = parentPose,
 		cframe = transform(pose.CFrame),
 		weight = round(pose.Weight),
@@ -291,12 +354,6 @@ local function serializePose(pose: Pose, parentPose: string?): Dictionary
 	if okMask then
 		item.maskWeight = round(maskWeight)
 	end
-	local children = {}
-	for _, child in pose:GetSubPoses() do
-		if child:IsA("Pose") then
-			table.insert(children, serializePose(child, item.path))
-		end
-	end
 	table.sort(children, function(left, right)
 		return left.name < right.name
 	end)
@@ -304,7 +361,10 @@ local function serializePose(pose: Pose, parentPose: string?): Dictionary
 	return item
 end
 
-local function serializeKeyframe(keyframe: Keyframe): Dictionary
+local function serializeKeyframe(
+	keyframe: Keyframe,
+	includeParts: { [string]: boolean }?
+): Dictionary
 	local markers = {}
 	for _, marker in keyframe:GetMarkers() do
 		table.insert(markers, {
@@ -319,7 +379,10 @@ local function serializeKeyframe(keyframe: Keyframe): Dictionary
 	local poses = {}
 	for _, pose in keyframe:GetPoses() do
 		if pose:IsA("Pose") then
-			table.insert(poses, serializePose(pose, nil))
+			local serialized = serializePose(pose, nil, includeParts)
+			if serialized then
+				table.insert(poses, serialized)
+			end
 		end
 	end
 	table.sort(poses, function(left, right)
@@ -419,17 +482,17 @@ local function solveFrame(
 	local frames: { [string]: CFrame } = {
 		[data.root.Name] = CFrame.identity,
 	}
-	local unresolved = table.clone(data.motors)
-	for _ = 1, #data.motors + 1 do
+	local unresolved = table.clone(data.joints)
+	for _ = 1, #data.joints + 1 do
 		local progressed = false
 		for index = #unresolved, 1, -1 do
-			local motor = unresolved[index]
-			local part0 = motor.Part0
-			local part1 = motor.Part1
+			local joint = unresolved[index]
+			local part0 = joint.Part0
+			local part1 = joint.Part1
 			local parentFrame = part0 and frames[part0.Name]
 			if part0 and part1 and parentFrame then
 				local sampled = sampleTrack(tracks[part1.Name], time)
-				frames[part1.Name] = parentFrame * motor.C0 * sampled * motor.C1:Inverse()
+				frames[part1.Name] = parentFrame * joint.C0 * sampled * joint.C1:Inverse()
 				table.remove(unresolved, index)
 				progressed = true
 			end
@@ -687,16 +750,25 @@ end
 
 function Analyzer.inspect(params: Dictionary, context: Context): Dictionary
 	local sequence = resolveSequence(params)
-	local data = rigDataFor(resolveRig(params, sequence, context))
 	local duration = sequenceDuration(sequence)
 	local sampleRate = math.clamp(params.sampleRate or 60, 1, 120)
 	local tracks = collectTrackKeys(sequence)
 	local keyframes = sortedKeyframes(sequence)
-	local rawStart = math.clamp(params.rawStart or 0, 0, math.max(0, #keyframes))
-	local rawCount = math.clamp(params.rawCount or 30, 0, 120)
+	local page = math.max(1, math.floor(params.page or 1))
+	local pageSize = math.clamp(math.floor(params.pageSize or 1), 1, 10)
+	local rawStart = math.clamp(
+		params.rawStart or ((page - 1) * pageSize),
+		0,
+		math.max(0, #keyframes)
+	)
+	local rawCount = math.clamp(params.rawCount or pageSize, 0, 10)
 	local sampleTotal = math.max(1, math.ceil(duration * sampleRate)) + 1
-	local sampleStart = math.clamp(params.sampleStart or 0, 0, sampleTotal)
-	local sampleCount = math.clamp(params.sampleCount or 30, 0, 120)
+	local sampleStart = math.clamp(
+		params.sampleStart or ((page - 1) * pageSize),
+		0,
+		sampleTotal
+	)
+	local sampleCount = math.clamp(params.sampleCount or pageSize, 0, 10)
 	local includeParts: { [string]: boolean }? = nil
 	if type(params.parts) == "table" and #params.parts > 0 then
 		includeParts = {}
@@ -704,9 +776,26 @@ function Analyzer.inspect(params: Dictionary, context: Context): Dictionary
 			includeParts[name] = true
 		end
 	end
+	local includeRig = params.includeRig ~= false
+	local includeRaw = params.includeRaw ~= false
+	local includeSamples = params.includeSamples ~= false
+	local includeMetrics = params.includeMetrics ~= false
+	local needsRig = includeRig or includeSamples or includeMetrics
+	local data: RigData? = nil
+	if needsRig then
+		data = rigDataFor(resolveRig(params, sequence, context))
+	end
 	local result: Dictionary = {
-		format = "motion-director-animation-analysis-v1",
+		format = "motion-director-animation-analysis-v2",
 		sequence = sequenceMetadata(sequence, context),
+		request = {
+			page = page,
+			pageSize = pageSize,
+			includeRig = includeRig,
+			includeRaw = includeRaw,
+			includeSamples = includeSamples,
+			includeMetrics = includeMetrics,
+		},
 		pagination = {
 			raw = {
 				total = #keyframes,
@@ -721,17 +810,20 @@ function Analyzer.inspect(params: Dictionary, context: Context): Dictionary
 			},
 		},
 	}
-	if params.includeRig ~= false then
+	if includeRig and data then
 		result.rig = rigSnapshot(data, context)
 	end
-	if params.includeRaw ~= false and rawCount > 0 then
+	if includeRaw and rawCount > 0 then
 		local raw = {}
 		for index = rawStart + 1, math.min(#keyframes, rawStart + rawCount) do
-			table.insert(raw, serializeKeyframe(keyframes[index]))
+			table.insert(raw, serializeKeyframe(keyframes[index], includeParts))
 		end
 		result.rawKeyframes = raw
 	end
-	if params.includeSamples ~= false and sampleCount > 0 then
+	if includeSamples and sampleCount > 0 then
+		if not data then
+			error("Spatial samples require a selected rig or rigPath.")
+		end
 		local samples = {}
 		for zeroIndex = sampleStart, math.min(sampleTotal - 1, sampleStart + sampleCount - 1) do
 			local time = if sampleTotal > 1 then duration * zeroIndex / (sampleTotal - 1) else 0
@@ -745,7 +837,10 @@ function Analyzer.inspect(params: Dictionary, context: Context): Dictionary
 		end
 		result.sampledFrames = samples
 	end
-	if params.includeMetrics ~= false then
+	if includeMetrics then
+		if not data then
+			error("Spatial metrics require a selected rig or rigPath.")
+		end
 		result.metrics = metricsFor(data, tracks, duration, sampleRate)
 	end
 	return result

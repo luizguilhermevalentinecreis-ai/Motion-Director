@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { MotionDirectorWebRelay } from "../src/web-relay.js";
 
@@ -397,8 +400,10 @@ test("serves a GPT-compatible OpenAPI document and privacy policy", async () => 
       >;
     };
     assert.equal(document.openapi, "3.1.0");
-    assert.equal(document.info.version, "0.5.0");
+    assert.equal(document.info.version, "0.6.0");
     assert.equal(document.servers[0]?.url, baseUrl);
+    assert.ok(document.paths["/v1/knowledge/global"]);
+    assert.ok(document.paths["/v1/knowledge/propose"]);
     assert.ok(document.paths["/v1/actions/execute"]);
     const actionInput =
       document.paths["/v1/actions/execute"]?.post?.requestBody?.content?.["application/json"]
@@ -424,5 +429,120 @@ test("serves a GPT-compatible OpenAPI document and privacy policy", async () => 
     assert.match(await privacyResponse.text(), /Motion Director Privacy Policy/);
   } finally {
     await relay.stop();
+  }
+});
+
+test("publishes developer-approved global knowledge across relay restarts", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "motion-director-knowledge-"));
+  const knowledgeFilePath = join(directory, "global.json");
+  const installationId = "developer-installation";
+  const firstPort = randomPort();
+  const firstBaseUrl = `http://127.0.0.1:${firstPort}`;
+  const firstRelay = new MotionDirectorWebRelay({
+    host: "127.0.0.1",
+    port: firstPort,
+    publicBaseUrl: firstBaseUrl,
+    knowledgeFilePath,
+    developerInstallationIds: [installationId],
+  });
+  try {
+    await firstRelay.start();
+    const connectionResponse = await post(firstBaseUrl, "/plugin/connect", {
+      installationId,
+      launchId: "knowledge-launch",
+      pairingCode: "DEVKN-OWLED",
+      pluginVersion: "0.6.0",
+    });
+    assert.equal(connectionResponse.status, 200);
+    const connection = await connectionResponse.json() as {
+      sessionId: string;
+      agentToken: string;
+      pairingCode: string;
+      knowledgeRole: string;
+    };
+    assert.equal(connection.knowledgeRole, "developer");
+
+    const proposalResponse = await post(firstBaseUrl, "/v1/knowledge/propose", {
+      pairingCode: connection.pairingCode,
+      category: "R6 posing",
+      title: "Preserve real pivots",
+      principle: "Translate the torso first and rotate rigid limbs around their real pivots.",
+      rationale: "Large local limb translations disconnect block rigs visually.",
+      appliesTo: ["R6", "pose studies"],
+      evidence: ["Creator Hub recommends moving the torso/root during pose construction."],
+    });
+    assert.equal(proposalResponse.status, 202);
+    const proposed = await proposalResponse.json() as {
+      proposal: { id: string; status: string };
+    };
+    assert.equal(proposed.proposal.status, "pending");
+
+    const pollResponse = await post(firstBaseUrl, "/plugin/poll", {
+      sessionId: connection.sessionId,
+      agentToken: connection.agentToken,
+    });
+    const poll = await pollResponse.json() as {
+      pendingKnowledge: { id: string };
+    };
+    assert.equal(poll.pendingKnowledge.id, proposed.proposal.id);
+
+    const readerConnectionResponse = await post(firstBaseUrl, "/plugin/connect", {
+      installationId: "public-reader-installation",
+      launchId: "reader-launch",
+      pluginVersion: "0.6.0",
+    });
+    const readerConnection = await readerConnectionResponse.json() as {
+      sessionId: string;
+      agentToken: string;
+      knowledgeRole: string;
+    };
+    assert.equal(readerConnection.knowledgeRole, "reader");
+    const forbiddenCommit = await post(firstBaseUrl, "/plugin/knowledge/resolve", {
+      sessionId: readerConnection.sessionId,
+      agentToken: readerConnection.agentToken,
+      proposalId: proposed.proposal.id,
+      decision: "commit",
+    });
+    assert.equal(forbiddenCommit.status, 403);
+
+    const commitResponse = await post(firstBaseUrl, "/plugin/knowledge/resolve", {
+      sessionId: connection.sessionId,
+      agentToken: connection.agentToken,
+      proposalId: proposed.proposal.id,
+      decision: "commit",
+    });
+    assert.equal(commitResponse.status, 200);
+    const committed = await commitResponse.json() as {
+      status: string;
+      snapshot: { version: number };
+    };
+    assert.equal(committed.status, "globally_published");
+    assert.equal(committed.snapshot.version, 1);
+  } finally {
+    await firstRelay.stop();
+  }
+
+  const secondPort = randomPort();
+  const secondBaseUrl = `http://127.0.0.1:${secondPort}`;
+  const secondRelay = new MotionDirectorWebRelay({
+    host: "127.0.0.1",
+    port: secondPort,
+    publicBaseUrl: secondBaseUrl,
+    knowledgeFilePath,
+  });
+  try {
+    await secondRelay.start();
+    const snapshotResponse = await post(secondBaseUrl, "/v1/knowledge/global", {});
+    assert.equal(snapshotResponse.status, 200);
+    const snapshot = await snapshotResponse.json() as {
+      version: number;
+      entries: Array<Record<string, unknown>>;
+    };
+    assert.equal(snapshot.version, 1);
+    assert.equal(snapshot.entries[0]?.title, "Preserve real pivots");
+    assert.equal("publishedBy" in (snapshot.entries[0] ?? {}), false);
+  } finally {
+    await secondRelay.stop();
+    await rm(directory, { recursive: true, force: true });
   }
 });

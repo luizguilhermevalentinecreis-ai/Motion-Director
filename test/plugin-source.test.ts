@@ -50,6 +50,14 @@ test("plugin exposes edit-time posing and a maximum-ten human finalization gate"
   assert.match(source, /#approvedNames > 10/);
 });
 
+test("plugin exposes developer approval for global knowledge", async () => {
+  const source = await readFile(pluginSourceUrl, "utf8");
+  assert.match(source, /pendingKnowledgeProposal/);
+  assert.match(source, /COMMIT GLOBAL/);
+  assert.match(source, /\/plugin\/knowledge\/resolve/);
+  assert.match(source, /knowledgeRole == "developer"/);
+});
+
 test("plugin retargets complete R6 sequences through world space and neutral rebasing", async () => {
   const [plugin, retargeter] = await Promise.all([
     readFile(pluginSourceUrl, "utf8"),

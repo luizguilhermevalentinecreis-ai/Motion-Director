@@ -9,13 +9,18 @@ local Selection = game:GetService("Selection")
 local ServerStorage = game:GetService("ServerStorage")
 local StudioService = game:GetService("StudioService")
 local AnimationAnalyzer = require(script.Parent:WaitForChild("AnimationAnalyzer"))
+local R6ToR15Retargeter = require(script.Parent:WaitForChild("R6ToR15Retargeter"))
 
 local LOCAL_BRIDGE_URL = "http://127.0.0.1:34718"
-local PLUGIN_VERSION = "0.3.0"
+local DEFAULT_CHATGPT_RELAY_URL = "https://motion-director-relay.onrender.com"
+local PAIRING_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+local PLUGIN_VERSION = "0.6.0"
 local HEADER = { ["x-roblox-motion-bridge"] = "1", ["content-type"] = "application/json" }
 
 local savedRelayUrl = plugin:GetSetting("MotionDirectorRelayUrl")
-local relayBridgeUrl = if type(savedRelayUrl) == "string" then savedRelayUrl:gsub("/+$", "") else ""
+local relayBridgeUrl = if type(savedRelayUrl) == "string" and savedRelayUrl ~= ""
+	then savedRelayUrl:gsub("/+$", "")
+	else DEFAULT_CHATGPT_RELAY_URL
 local savedMode = plugin:GetSetting("MotionDirectorBridgeMode")
 local bridgeMode = if savedMode == "chatgpt" then "chatgpt" else "local"
 local installationId = plugin:GetSetting("MotionDirectorInstallationId")
@@ -27,9 +32,38 @@ end
 local sessionId: string? = nil
 local agentToken: string? = nil
 local pairingCode: string? = nil
+local launchId = HttpService:GenerateGUID(false)
+local studioUserId = StudioService:GetUserId()
+local knowledgeRole = "reader"
+
+local function pairingCodeForLaunch(value: string): string
+	local compact = value:gsub("[^%x]", "")
+	local characters = {}
+	for index = 1, 10 do
+		local offset = ((index - 1) * 2) % #compact + 1
+		local byte = tonumber(compact:sub(offset, offset + 1), 16) or index
+		local alphabetIndex = byte % #PAIRING_CODE_ALPHABET + 1
+		table.insert(characters, PAIRING_CODE_ALPHABET:sub(alphabetIndex, alphabetIndex))
+	end
+	local raw = table.concat(characters)
+	return raw:sub(1, 5) .. "-" .. raw:sub(6, 10)
+end
+
+local userCodeSettingKey = "MotionDirectorUserPairingCode:" .. tostring(studioUserId)
+local savedUserPairingCode = plugin:GetSetting(userCodeSettingKey)
+local userPairingCode: string
+if type(savedUserPairingCode) == "string"
+	and savedUserPairingCode:match("^[A-Z2-9][A-Z2-9][A-Z2-9][A-Z2-9][A-Z2-9]%-[A-Z2-9][A-Z2-9][A-Z2-9][A-Z2-9][A-Z2-9]$")
+then
+	userPairingCode = savedUserPairingCode
+else
+	userPairingCode = pairingCodeForLaunch(HttpService:GenerateGUID(false))
+	plugin:SetSetting(userCodeSettingKey, userPairingCode)
+end
 local pollIntervalSeconds = 0.35
 
 type Dictionary = { [string]: any }
+local pendingKnowledgeProposal: Dictionary? = nil
 
 local toolbar = plugin:CreateToolbar("Motion Director")
 local toggleButton = toolbar:CreateButton(
@@ -44,9 +78,9 @@ local widgetInfo = DockWidgetPluginGuiInfo.new(
 	true,
 	false,
 	340,
-	390,
+	570,
 	280,
-	300
+	470
 )
 local widget = plugin:CreateDockWidgetPluginGui("RobloxMotionDirector", widgetInfo)
 widget.Title = "Motion Director"
@@ -164,14 +198,19 @@ local chatGptModeCorner = Instance.new("UICorner")
 chatGptModeCorner.CornerRadius = UDim.new(0, 7)
 chatGptModeCorner.Parent = chatGptModeButton
 
-local pairLabel = Instance.new("TextLabel")
+local pairLabel = Instance.new("TextBox")
 pairLabel.BackgroundColor3 = Color3.fromRGB(29, 32, 40)
 pairLabel.BorderSizePixel = 0
+pairLabel.ClearTextOnFocus = false
 pairLabel.Font = Enum.Font.Code
-pairLabel.Text = "ChatGPT pairing code will appear here"
+pairLabel.MultiLine = true
+pairLabel.Text = "Your ChatGPT connection code will appear here"
 pairLabel.TextColor3 = Color3.fromRGB(160, 169, 193)
+pairLabel.TextEditable = false
 pairLabel.TextSize = 14
 pairLabel.TextWrapped = true
+pairLabel.TextXAlignment = Enum.TextXAlignment.Center
+pairLabel.TextYAlignment = Enum.TextYAlignment.Center
 pairLabel.Size = UDim2.new(1, 0, 0, 42)
 pairLabel.Parent = root
 
@@ -179,12 +218,108 @@ local pairCorner = Instance.new("UICorner")
 pairCorner.CornerRadius = UDim.new(0, 7)
 pairCorner.Parent = pairLabel
 
+local developerIdLabel = Instance.new("TextBox")
+developerIdLabel.BackgroundColor3 = Color3.fromRGB(29, 32, 40)
+developerIdLabel.BorderSizePixel = 0
+developerIdLabel.ClearTextOnFocus = false
+developerIdLabel.Font = Enum.Font.Code
+developerIdLabel.MultiLine = true
+developerIdLabel.Text = "DEVELOPMENT INSTALLATION ID\n" .. installationId
+developerIdLabel.TextColor3 = Color3.fromRGB(135, 145, 171)
+developerIdLabel.TextEditable = false
+developerIdLabel.TextSize = 10
+developerIdLabel.TextWrapped = true
+developerIdLabel.TextXAlignment = Enum.TextXAlignment.Center
+developerIdLabel.TextYAlignment = Enum.TextYAlignment.Center
+developerIdLabel.Size = UDim2.new(1, 0, 0, 42)
+developerIdLabel.Parent = root
+
+local developerIdCorner = Instance.new("UICorner")
+developerIdCorner.CornerRadius = UDim.new(0, 7)
+developerIdCorner.Parent = developerIdLabel
+
+local knowledgeLabel = Instance.new("TextLabel")
+knowledgeLabel.BackgroundColor3 = Color3.fromRGB(29, 32, 40)
+knowledgeLabel.BorderSizePixel = 0
+knowledgeLabel.Font = Enum.Font.BuilderSans
+knowledgeLabel.Text = "Global knowledge: read-only"
+knowledgeLabel.TextColor3 = Color3.fromRGB(160, 169, 193)
+knowledgeLabel.TextSize = 12
+knowledgeLabel.TextWrapped = true
+knowledgeLabel.TextXAlignment = Enum.TextXAlignment.Left
+knowledgeLabel.TextYAlignment = Enum.TextYAlignment.Center
+knowledgeLabel.Size = UDim2.new(1, 0, 0, 58)
+knowledgeLabel.Visible = false
+knowledgeLabel.Parent = root
+
+local knowledgeCorner = Instance.new("UICorner")
+knowledgeCorner.CornerRadius = UDim.new(0, 7)
+knowledgeCorner.Parent = knowledgeLabel
+
+local knowledgeButtons = Instance.new("Frame")
+knowledgeButtons.BackgroundTransparency = 1
+knowledgeButtons.Size = UDim2.new(1, 0, 0, 34)
+knowledgeButtons.Visible = false
+knowledgeButtons.Parent = root
+
+local knowledgeButtonsLayout = Instance.new("UIListLayout")
+knowledgeButtonsLayout.FillDirection = Enum.FillDirection.Horizontal
+knowledgeButtonsLayout.Padding = UDim.new(0, 8)
+knowledgeButtonsLayout.Parent = knowledgeButtons
+
+local commitKnowledgeButton = Instance.new("TextButton")
+commitKnowledgeButton.BackgroundColor3 = Color3.fromRGB(47, 117, 82)
+commitKnowledgeButton.BorderSizePixel = 0
+commitKnowledgeButton.Font = Enum.Font.BuilderSansBold
+commitKnowledgeButton.Text = "COMMIT GLOBAL"
+commitKnowledgeButton.TextColor3 = Color3.fromRGB(235, 255, 243)
+commitKnowledgeButton.TextSize = 12
+commitKnowledgeButton.Size = UDim2.new(0.62, -4, 1, 0)
+commitKnowledgeButton.Parent = knowledgeButtons
+
+local commitKnowledgeCorner = Instance.new("UICorner")
+commitKnowledgeCorner.CornerRadius = UDim.new(0, 7)
+commitKnowledgeCorner.Parent = commitKnowledgeButton
+
+local rejectKnowledgeButton = Instance.new("TextButton")
+rejectKnowledgeButton.BackgroundColor3 = Color3.fromRGB(113, 53, 59)
+rejectKnowledgeButton.BorderSizePixel = 0
+rejectKnowledgeButton.Font = Enum.Font.BuilderSansBold
+rejectKnowledgeButton.Text = "REJECT"
+rejectKnowledgeButton.TextColor3 = Color3.fromRGB(255, 235, 237)
+rejectKnowledgeButton.TextSize = 12
+rejectKnowledgeButton.Size = UDim2.new(0.38, -4, 1, 0)
+rejectKnowledgeButton.Parent = knowledgeButtons
+
+local rejectKnowledgeCorner = Instance.new("UICorner")
+rejectKnowledgeCorner.CornerRadius = UDim.new(0, 7)
+rejectKnowledgeCorner.Parent = rejectKnowledgeButton
+
 toggleButton.Click:Connect(function()
 	widget.Enabled = not widget.Enabled
 end)
 
 local running = true
 local activePreviewTracks: { AnimationTrack } = {}
+
+local function updateKnowledgeUi()
+	local developerActive = bridgeMode == "chatgpt" and knowledgeRole == "developer"
+	knowledgeLabel.Visible = developerActive
+	knowledgeButtons.Visible = developerActive and pendingKnowledgeProposal ~= nil
+	if not developerActive then
+		return
+	end
+	if pendingKnowledgeProposal then
+		local titleText = tostring(pendingKnowledgeProposal.title or "Untitled proposal")
+		local principleText = tostring(pendingKnowledgeProposal.principle or "")
+		knowledgeLabel.Text = "PENDING GLOBAL KNOWLEDGE\n"
+			.. titleText:sub(1, 70)
+			.. "\n"
+			.. principleText:sub(1, 150)
+	else
+		knowledgeLabel.Text = "DEVELOPMENT KNOWLEDGE\nNo pending global proposal."
+	end
+end
 
 local function updateModeButtons()
 	local localActive = bridgeMode == "local"
@@ -196,17 +331,22 @@ local function updateModeButtons()
 		else Color3.fromRGB(67, 96, 154)
 	relayUrlBox.Visible = not localActive
 	pairLabel.Visible = not localActive
+	developerIdLabel.Visible = not localActive
 	explanation.Text = if localActive
 		then "Local MCP bridge. Drafts remain reversible until an explicit commit."
-		else "Remote GPT Action bridge. Share only the temporary pairing code shown below."
+		else "Remote GPT Action bridge. Treat the personal connection code below as a secret."
+	updateKnowledgeUi()
 end
 
 local function resetConnection()
 	sessionId = nil
 	agentToken = nil
 	pairingCode = nil
+	knowledgeRole = "reader"
+	pendingKnowledgeProposal = nil
 	pollIntervalSeconds = if bridgeMode == "local" then 0.35 else 0.5
 	pairLabel.Text = "Connecting to ChatGPT relay..."
+	updateKnowledgeUi()
 end
 
 localModeButton.MouseButton1Click:Connect(function()
@@ -269,6 +409,49 @@ local function request(path: string, body: Dictionary): (boolean, any)
 	end
 	return true, decoded
 end
+
+local function resolvePendingKnowledge(decision: string)
+	if not pendingKnowledgeProposal or not sessionId or not agentToken then
+		return
+	end
+	local proposalId = pendingKnowledgeProposal.id
+	if type(proposalId) ~= "string" then
+		return
+	end
+	commitKnowledgeButton.Active = false
+	rejectKnowledgeButton.Active = false
+	knowledgeLabel.Text = if decision == "commit"
+		then "Publishing global knowledge..."
+		else "Rejecting knowledge proposal..."
+	task.spawn(function()
+		local ok, result = request("/plugin/knowledge/resolve", {
+			sessionId = sessionId,
+			agentToken = agentToken,
+			proposalId = proposalId,
+			decision = decision,
+		})
+		commitKnowledgeButton.Active = true
+		rejectKnowledgeButton.Active = true
+		if ok then
+			pendingKnowledgeProposal = nil
+			knowledgeLabel.Text = if decision == "commit"
+				then "GLOBAL KNOWLEDGE PUBLISHED\nVersion " .. tostring(result.snapshot and result.snapshot.version or "?")
+				else "KNOWLEDGE PROPOSAL REJECTED"
+			task.delay(2, updateKnowledgeUi)
+		else
+			knowledgeLabel.Text = "KNOWLEDGE UPDATE FAILED\n" .. tostring(result)
+		end
+		knowledgeButtons.Visible = false
+	end)
+end
+
+commitKnowledgeButton.MouseButton1Click:Connect(function()
+	resolvePendingKnowledge("commit")
+end)
+
+rejectKnowledgeButton.MouseButton1Click:Connect(function()
+	resolvePendingKnowledge("reject")
+end)
 
 local function pathOf(instance: Instance): string
 	local pieces = {}
@@ -418,6 +601,7 @@ local function inspectRig(params: Dictionary): Dictionary
 				path = pathOf(descendant),
 				parentPart = descendant.Part0 and descendant.Part0.Name or nil,
 				childPart = descendant.Part1 and descendant.Part1.Name or nil,
+				trackName = descendant.Part1 and descendant.Part1.Name or descendant.Name,
 				c0 = transform(descendant.C0),
 				c1 = transform(descendant.C1),
 				currentTransform = transform(descendant.Transform),
@@ -428,11 +612,30 @@ local function inspectRig(params: Dictionary): Dictionary
 				path = pathOf(descendant),
 				parentPart = descendant.Part0 and descendant.Part0.Name or nil,
 				childPart = descendant.Part1 and descendant.Part1.Name or nil,
+				trackName = descendant.Part1 and descendant.Part1.Name or descendant.Name,
 				c0 = transform(descendant.C0),
 				c1 = transform(descendant.C1),
 				currentTransform = transform(descendant.Transform),
 				isKinematic = descendant.IsKinematic,
+				attachment0 = descendant.Attachment0 and {
+					name = descendant.Attachment0.Name,
+					path = pathOf(descendant.Attachment0),
+					cframe = transform(descendant.Attachment0.CFrame),
+				} or nil,
+				attachment1 = descendant.Attachment1 and {
+					name = descendant.Attachment1.Name,
+					path = pathOf(descendant.Attachment1),
+					cframe = transform(descendant.Attachment1.CFrame),
+				} or nil,
 			})
+			if not descendant.IsKinematic then
+				table.insert(
+					warnings,
+					"AnimationConstraint "
+						.. descendant.Name
+						.. " is force-driven (IsKinematic=false); authored transforms may physically lag."
+				)
+			end
 		elseif descendant:IsA("Bone") then
 			table.insert(bones, {
 				name = descendant.Name,
@@ -456,12 +659,29 @@ local function inspectRig(params: Dictionary): Dictionary
 	if #motors == 0 and #animationConstraints == 0 and #bones == 0 then
 		table.insert(warnings, "The selected model has no Motor6D, AnimationConstraint, or Bone joints.")
 	end
+	if #motors > 0 and #animationConstraints > 0 then
+		table.insert(
+			warnings,
+			"The selected rig has a hybrid Motor6D/AnimationConstraint topology; use each joint's reported trackName and basis."
+		)
+	end
 
 	local humanoid = rig:FindFirstChildOfClass("Humanoid")
+	local jointSystem = if #animationConstraints > 0 and #motors > 0
+		then "Hybrid"
+		elseif #animationConstraints > 0
+		then "AnimationConstraint"
+		elseif #motors > 0
+		then "Motor6D"
+		elseif #bones > 0
+		then "Bone"
+		else "None"
 	return {
 		id = pathOf(rig),
 		name = rig.Name,
 		rigType = humanoid and humanoid.RigType.Name or "Custom",
+		jointSystem = jointSystem,
+		avatarJointUpgrade = #animationConstraints > 0,
 		scale = humanoid and {
 			hipHeight = humanoid.HipHeight,
 		} or nil,
@@ -680,8 +900,9 @@ local handlers: { [string]: (Dictionary) -> any } = {}
 handlers["system.capabilities"] = function(_params)
 	return {
 		pluginVersion = PLUGIN_VERSION,
-		parentSpaceBakerVersion = 6,
-		animationAnalyzerVersion = 1,
+		parentSpaceBakerVersion = 7,
+		animationAnalyzerVersion = 2,
+		r6ToR15RetargeterVersion = 1,
 		autoCreateAnimator = true,
 		synchronizedMultiRig = true,
 		isRunning = RunService:IsRunning(),
@@ -716,6 +937,43 @@ end
 
 handlers["analysis.compareAnimations"] = function(params)
 	return AnimationAnalyzer.compare(params, analyzerContext)
+end
+
+handlers["animation.stageR6ToR15Retarget"] = function(params)
+	return withRecording("Stage R6 to R15 world-space retarget", function()
+		local result = R6ToR15Retargeter.convert(params, {
+			pathOf = pathOf,
+			selectedRigs = selectedRigs,
+		})
+		local drafts = ensureFolder(ServerStorage, "MotionDirectorDrafts")
+		local transactionId = HttpService:GenerateGUID(false)
+		local transaction = Instance.new("Folder")
+		transaction.Name = transactionId
+		transaction:SetAttribute("TransactionName", params.transactionName)
+		transaction:SetAttribute("RigPath", pathOf(result.targetRig))
+		transaction:SetAttribute("RetargetMethod", result.method)
+		transaction:SetAttribute("CreatedAt", os.time())
+		transaction.Parent = drafts
+		local targetRig = Instance.new("ObjectValue")
+		targetRig.Name = "TargetRig"
+		targetRig.Value = result.targetRig
+		targetRig.Parent = transaction
+		result.sequence.Parent = transaction
+		return {
+			transactionId = transactionId,
+			sequencePath = pathOf(result.sequence),
+			sourceAnimation = pathOf(result.sourceSequence),
+			sourceRig = pathOf(result.sourceRig),
+			targetRig = pathOf(result.targetRig),
+			keyframeCount = result.keyframeCount,
+			convertedPoseCount = result.convertedPoseCount,
+			markerCount = result.markerCount,
+			method = result.method,
+			legLateralScale = result.legLateralScale,
+			maxLegLateralOffset = result.maxLegLateralOffset,
+			status = "staged",
+		}
+	end)
 end
 
 handlers["scene.createTestRig"] = function(params)
@@ -1711,7 +1969,9 @@ end
 local function connect(): boolean
 	local ok, result = request("/plugin/connect", {
 		installationId = installationId,
-		studioUserId = StudioService:GetUserId(),
+		launchId = launchId,
+		pairingCode = userPairingCode,
+		studioUserId = studioUserId,
 		placeId = game.PlaceId,
 		placeName = game.Name,
 		pluginVersion = PLUGIN_VERSION,
@@ -1732,18 +1992,20 @@ local function connect(): boolean
 	sessionId = result.sessionId
 	agentToken = result.agentToken
 	pairingCode = result.pairingCode
+	knowledgeRole = if result.knowledgeRole == "developer" then "developer" else "reader"
 	if type(result.pollIntervalMs) == "number" then
 		pollIntervalSeconds = math.clamp(result.pollIntervalMs / 1000, 0.2, 3)
 	end
 	status.Text = if bridgeMode == "local"
 		then "Connected locally\nReady for MCP animation direction."
-		else "Connected to ChatGPT\nUse the pairing code below."
+		else "Connected to ChatGPT\nUse your personal code below."
 	status.TextColor3 = Color3.fromRGB(113, 231, 163)
 	if bridgeMode == "chatgpt" then
 		pairLabel.Text = if type(pairingCode) == "string"
-			then "PAIRING CODE\n" .. pairingCode
+			then "USER CODE\n" .. pairingCode
 			else "Relay did not return a pairing code"
 	end
+	updateKnowledgeUi()
 	return true
 end
 
@@ -1781,6 +2043,14 @@ task.spawn(function()
 			pairingCode = nil
 			task.wait(1)
 			continue
+		end
+		if knowledgeRole == "developer" then
+			if type(response.pendingKnowledge) == "table" then
+				pendingKnowledgeProposal = response.pendingKnowledge
+			elseif response.pendingKnowledge == nil then
+				pendingKnowledgeProposal = nil
+			end
+			updateKnowledgeUi()
 		end
 		local command = response.command
 		if command then

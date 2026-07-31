@@ -15,6 +15,15 @@ export function reviewDraft(draft: AnimationDraft): QualityReport {
     styles.has("r6-combat-displacement");
   const usesR6ExtremeSkillDisplacement =
     usesR6CombatDisplacement && styles.has("r6-anime-extreme-displacement");
+  const usesR6LocomotionDisplacement =
+    rigType === "R6" &&
+    draft.priority === "movement";
+  const usesR6IdleDisplacement =
+    rigType === "R6" &&
+    draft.priority === "idle";
+  const usesR6PoseStudyDisplacement =
+    rigType === "R6" &&
+    styles.has("pose-study");
 
   const populatedTracks = draft.tracks.filter((track) => track.keys.length >= 2);
   const coverage = draft.tracks.length === 0 ? 0 : populatedTracks.length / draft.tracks.length;
@@ -131,6 +140,12 @@ export function reviewDraft(draft: AnimationDraft): QualityReport {
       ? 1.15
       : usesR6CombatDisplacement
         ? 0.72
+        : usesR6LocomotionDisplacement
+          ? 0.55
+        : usesR6IdleDisplacement
+            ? 0.28
+          : usesR6PoseStudyDisplacement
+            ? 0.25
         : spatiallySolved
           ? 0.18
           : 0.03;
@@ -138,6 +153,12 @@ export function reviewDraft(draft: AnimationDraft): QualityReport {
       ? 1.5
       : usesR6CombatDisplacement
         ? 1.05
+        : usesR6LocomotionDisplacement
+          ? 0.8
+        : usesR6IdleDisplacement
+            ? 0.45
+          : usesR6PoseStudyDisplacement
+            ? 0.4
         : spatiallySolved
           ? 0.24
           : 0.08;
@@ -159,17 +180,35 @@ export function reviewDraft(draft: AnimationDraft): QualityReport {
     metrics.push({
       name: usesR6CombatDisplacement
         ? "r6_combat_displacement_envelope"
+        : usesR6LocomotionDisplacement
+          ? "r6_locomotion_displacement_envelope"
+          : usesR6IdleDisplacement
+            ? "r6_idle_displacement_envelope"
+          : usesR6PoseStudyDisplacement
+            ? "r6_pose_study_displacement_envelope"
         : "r6_limb_translation_safety",
       score,
       severity: unsafeJoints.size > 0 ? "warning" : "info",
       joints: [...unsafeJoints],
       explanation: usesR6CombatDisplacement
         ? `Largest R6 combat limb offset is ${maximumLimbOffset.toFixed(3)} studs; ${usesR6ExtremeSkillDisplacement ? "extreme anime skills" : "combat"} use a wider rotation-plus-translation envelope.`
+        : usesR6LocomotionDisplacement
+          ? `Largest R6 locomotion limb offset is ${maximumLimbOffset.toFixed(3)} studs; this contextual envelope still requires connected pivots, stable contacts, and visual review.`
+          : usesR6IdleDisplacement
+            ? `Largest R6 idle limb offset is ${maximumLimbOffset.toFixed(3)} studs; subtle offsets must preserve a planted silhouette and avoid whole-body drift.`
+          : usesR6PoseStudyDisplacement
+            ? `Largest R6 pose-study limb offset is ${maximumLimbOffset.toFixed(3)} studs; the pose still requires visual proof of connected pivots and a cleaner silhouette.`
         : `Largest non-root R6 positional offset is ${maximumLimbOffset.toFixed(3)} studs.`,
       suggestedAction:
         unsafeJoints.size > 0
           ? usesR6CombatDisplacement
             ? "Reduce the offset or prove that its arc, torso drive, and impact silhouette remain continuous."
+            : usesR6LocomotionDisplacement
+              ? "Reduce the offset or prove connected shoulder/hip pivots, clean foot contacts, and a readable locomotion silhouette."
+              : usesR6IdleDisplacement
+                ? "Reduce the offset or prove that it supports breathing, acting, or asymmetry without visible joint separation."
+              : usesR6PoseStudyDisplacement
+                ? "Reduce the offset or prove that it strengthens the intended silhouette without disconnecting the shoulder or hip."
             : "Return the limb to its real pivot or provide a world-space joint-continuity solve before translating it."
           : undefined,
     });

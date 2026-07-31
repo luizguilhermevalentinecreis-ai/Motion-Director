@@ -1,6 +1,11 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { animationDraftSchema, validateTemporalIntegrity } from "./domain.js";
+import {
+  createGlobalKnowledgeStore,
+  type GlobalKnowledgeStore,
+  type KnowledgeProposalInput,
+} from "./global-knowledge.js";
 import { reviewDraft } from "./quality.js";
 
 type JsonObject = Record<string, unknown>;
@@ -98,6 +103,12 @@ export interface WebRelayOptions {
   sessionTtlMs?: number;
   jobTtlMs?: number;
   maxPendingJobsPerSession?: number;
+  knowledgeStore?: GlobalKnowledgeStore;
+  knowledgeFilePath?: string;
+  knowledgeRedisUrl?: string;
+  knowledgeRedisToken?: string;
+  knowledgeRedisKey?: string;
+  developerInstallationIds?: string[];
 }
 
 const PAIRING_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -427,6 +438,8 @@ export class MotionDirectorWebRelay {
   private readonly sessionTtlMs: number;
   private readonly jobTtlMs: number;
   private readonly maxPendingJobsPerSession: number;
+  private readonly knowledgeStore: GlobalKnowledgeStore;
+  private readonly developerInstallationIds: Set<string>;
   private server: ReturnType<typeof createServer> | undefined;
   private readonly sessions = new Map<string, PluginSession>();
   private readonly sessionByInstallation = new Map<string, string>();
@@ -441,6 +454,13 @@ export class MotionDirectorWebRelay {
     this.sessionTtlMs = options.sessionTtlMs ?? 5 * 60_000;
     this.jobTtlMs = options.jobTtlMs ?? 15 * 60_000;
     this.maxPendingJobsPerSession = options.maxPendingJobsPerSession ?? 8;
+    this.knowledgeStore = options.knowledgeStore ?? createGlobalKnowledgeStore({
+      ...(options.knowledgeFilePath ? { filePath: options.knowledgeFilePath } : {}),
+      ...(options.knowledgeRedisUrl ? { redisUrl: options.knowledgeRedisUrl } : {}),
+      ...(options.knowledgeRedisToken ? { redisToken: options.knowledgeRedisToken } : {}),
+      ...(options.knowledgeRedisKey ? { redisKey: options.knowledgeRedisKey } : {}),
+    });
+    this.developerInstallationIds = new Set(options.developerInstallationIds ?? []);
   }
 
   async start(): Promise<void> {
@@ -499,6 +519,18 @@ export class MotionDirectorWebRelay {
       }
       if (request.method === "POST" && url.pathname === "/plugin/result") {
         await this.pluginResult(request, response);
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/plugin/knowledge/resolve") {
+        await this.pluginResolveKnowledge(request, response);
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/v1/knowledge/global") {
+        await this.actionGlobalKnowledge(request, response);
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/v1/knowledge/propose") {
+        await this.actionProposeKnowledge(request, response);
         return;
       }
       if (request.method === "POST" && url.pathname === "/v1/actions/studio-status") {
@@ -573,6 +605,7 @@ export class MotionDirectorWebRelay {
       pairingCode: session.pairingCode,
       pollIntervalMs: 500,
       expiresWithoutHeartbeatMs: this.sessionTtlMs,
+      knowledgeRole: this.isKnowledgeDeveloper(session) ? "developer" : "reader",
     });
   }
 
@@ -593,7 +626,77 @@ export class MotionDirectorWebRelay {
         job.updatedAt = Date.now();
       }
     }
-    this.json(response, 200, { command });
+    const pendingKnowledge = this.isKnowledgeDeveloper(session)
+      ? (await this.knowledgeStore.pending())[0] ?? null
+      : null;
+    this.json(response, 200, { command, pendingKnowledge });
+  }
+
+  private async actionGlobalKnowledge(
+    request: IncomingMessage,
+    response: ServerResponse,
+  ): Promise<void> {
+    await this.readJson(request);
+    const snapshot = await this.knowledgeStore.snapshot();
+    this.json(response, 200, {
+      scope: "global",
+      publicationPolicy: "developer-approved",
+      schemaVersion: snapshot.schemaVersion,
+      version: snapshot.version,
+      updatedAt: snapshot.updatedAt,
+      entries: snapshot.entries.map(({ publishedBy: _publishedBy, ...entry }) => entry),
+    });
+  }
+
+  private async actionProposeKnowledge(
+    request: IncomingMessage,
+    response: ServerResponse,
+  ): Promise<void> {
+    const body = await this.readJson(request);
+    const code = normalizePairingCode(body.pairingCode);
+    const session = code ? this.sessionForPairingCode(code) : undefined;
+    if (!code || !session) {
+      this.json(response, 404, { error: "No active Studio matches that connection code." });
+      return;
+    }
+    const input = this.knowledgeProposalInput(body);
+    const proposal = await this.knowledgeStore.propose(input, `studio-session:${session.id}`);
+    this.json(response, 202, {
+      status: "pending_developer_approval",
+      proposal,
+      instruction:
+        "A developer installation must approve this proposal in the Motion Director Studio plugin before it becomes global.",
+    });
+  }
+
+  private async pluginResolveKnowledge(
+    request: IncomingMessage,
+    response: ServerResponse,
+  ): Promise<void> {
+    const body = await this.readJson(request);
+    const session = this.authenticatePlugin(body);
+    if (!session) {
+      this.json(response, 401, { reconnect: true, error: "Invalid or expired plugin session." });
+      return;
+    }
+    if (!this.isKnowledgeDeveloper(session)) {
+      this.json(response, 403, { error: "This plugin installation cannot publish global knowledge." });
+      return;
+    }
+    const proposalId = this.requiredString(body.proposalId, "proposalId", 160);
+    const decision = body.decision;
+    if (decision !== "commit" && decision !== "reject") {
+      throw new Error("decision must be commit or reject.");
+    }
+    const result = await this.knowledgeStore.resolve(
+      proposalId,
+      decision,
+      `installation:${session.installationId}`,
+    );
+    this.json(response, 200, {
+      status: decision === "commit" ? "globally_published" : "rejected",
+      ...result,
+    });
   }
 
   private async pluginResult(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -1001,11 +1104,39 @@ export class MotionDirectorWebRelay {
     };
   }
 
+  private isKnowledgeDeveloper(session: PluginSession): boolean {
+    return this.developerInstallationIds.has(session.installationId);
+  }
+
+  private knowledgeProposalInput(body: JsonObject): KnowledgeProposalInput {
+    const stringArray = (
+      value: unknown,
+      name: string,
+      maxItems: number,
+      maxLength: number,
+    ): string[] => {
+      if (!Array.isArray(value) || value.length > maxItems) {
+        throw new Error(`${name} must be an array with at most ${maxItems} items.`);
+      }
+      return value.map((item, index) =>
+        this.requiredString(item, `${name}[${index}]`, maxLength));
+    };
+    return {
+      category: this.requiredString(body.category, "category", 80),
+      title: this.requiredString(body.title, "title", 140),
+      principle: this.requiredString(body.principle, "principle", 1_200),
+      rationale: this.requiredString(body.rationale, "rationale", 2_000),
+      appliesTo: stringArray(body.appliesTo, "appliesTo", 16, 100),
+      evidence: stringArray(body.evidence, "evidence", 12, 400),
+    };
+  }
+
   private publicSession(session: PluginSession): JsonObject {
     return {
       placeId: session.placeId ?? 0,
       placeName: session.placeName ?? "Unknown place",
       pluginVersion: session.pluginVersion ?? "unknown",
+      knowledgeRole: this.isKnowledgeDeveloper(session) ? "developer" : "reader",
       connectedAt: session.connectedAt,
       lastSeenAt: session.lastSeenAt,
     };
@@ -1083,12 +1214,82 @@ export class MotionDirectorWebRelay {
       openapi: "3.1.0",
       info: {
         title: "Motion Director for Roblox Studio",
-        version: "0.5.0",
+        version: "0.6.0",
         description:
-          "Pairs a ChatGPT conversation with a user's open Roblox Studio and executes bounded animation-authoring operations.",
+          "Pairs ChatGPT with Roblox Studio, executes bounded animation-authoring operations, and distributes developer-approved global animation knowledge.",
       },
       servers: [{ url: this.publicBaseUrl }],
       paths: {
+        "/v1/knowledge/global": {
+          post: {
+            operationId: "getMotionDirectorGlobalKnowledge",
+            summary: "Load the latest developer-approved global animation knowledge.",
+            description:
+              "Public read-only knowledge shared by every Motion Director chat and user. Call before planning animation work.",
+            requestBody: {
+              required: true,
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    properties: {},
+                    additionalProperties: false,
+                  },
+                },
+              },
+            },
+            responses: { "200": { description: "Published global knowledge snapshot." } },
+          },
+        },
+        "/v1/knowledge/propose": {
+          post: {
+            operationId: "proposeMotionDirectorGlobalKnowledge",
+            summary: "Propose a generalizable animation lesson for developer review.",
+            description:
+              "Creates a pending proposal only. It does not become global until an authorized development installation approves it.",
+            requestBody: {
+              required: true,
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    required: [
+                      "pairingCode",
+                      "category",
+                      "title",
+                      "principle",
+                      "rationale",
+                      "appliesTo",
+                      "evidence",
+                    ],
+                    properties: {
+                      pairingCode: pairingSchema,
+                      category: { type: "string", maxLength: 80 },
+                      title: { type: "string", maxLength: 140 },
+                      principle: { type: "string", maxLength: 1200 },
+                      rationale: { type: "string", maxLength: 2000 },
+                      appliesTo: {
+                        type: "array",
+                        maxItems: 16,
+                        items: { type: "string", maxLength: 100 },
+                      },
+                      evidence: {
+                        type: "array",
+                        maxItems: 12,
+                        items: { type: "string", maxLength: 400 },
+                      },
+                    },
+                    additionalProperties: false,
+                  },
+                },
+              },
+            },
+            responses: {
+              "202": { description: "Proposal awaiting approval in the development plugin." },
+              "404": { description: "No paired Studio." },
+            },
+          },
+        },
         "/v1/actions/studio-status": {
           post: {
             operationId: "getMotionDirectorStudioStatus",
@@ -1175,11 +1376,11 @@ export class MotionDirectorWebRelay {
 <title>Motion Director Privacy Policy</title></head><body>
 <main><h1>Motion Director Privacy Policy</h1>
 <p>Motion Director relays commands between ChatGPT and the Roblox Studio session that a user explicitly pairs.</p>
-<h2>Data processed</h2><p>Personal connection codes, plugin version, place identifier and name, animation drafts, selected rig metadata, command results, and operational timestamps.</p>
-<h2>Purpose</h2><p>Data is used only to route requested animation operations, return results, prevent abuse, and diagnose failures.</p>
-<h2>Retention</h2><p>Pairing sessions and command jobs are temporary and expire automatically. Production deployments must configure infrastructure logs with the shortest practical retention.</p>
-<h2>Sharing</h2><p>Motion Director does not sell personal data. Data is sent only to the paired Roblox Studio session and infrastructure providers required to operate the relay.</p>
-<h2>User control</h2><p>Closing Studio or disabling remote mode makes the connected Studio unavailable. Users can discard staged animations before commit.</p>
+<h2>Data processed</h2><p>Personal connection codes, plugin installation identifiers, plugin version, place identifier and name, animation drafts, selected rig metadata, command results, global knowledge proposals, and operational timestamps.</p>
+<h2>Purpose</h2><p>Data is used to route requested animation operations, return results, prevent abuse, diagnose failures, and distribute developer-approved animation guidance.</p>
+<h2>Retention</h2><p>Pairing sessions and command jobs expire automatically. Pending proposals and approved global knowledge are retained until rejected, superseded, or removed by the project operator.</p>
+<h2>Sharing</h2><p>Motion Director does not sell personal data. Approved global knowledge is intentionally shared with every Motion Director user; connection codes, place data, drafts, and proposal authorship are not included in the public snapshot.</p>
+<h2>User control</h2><p>Closing Studio or disabling remote mode makes the connected Studio unavailable. Users can discard staged animations before commit. Knowledge proposals remain unpublished until an authorized development installation approves them.</p>
 <h2>Security</h2><p>The relay exposes a fixed allowlist of animation operations and does not provide arbitrary Luau or filesystem execution.</p>
 <p>Contact: replace-this-address-before-publication@example.com</p></main></body></html>`;
   }

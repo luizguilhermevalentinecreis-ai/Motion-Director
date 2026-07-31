@@ -9,3 +9,11 @@ services:
     envVars:
       - key: MOTION_RELAY_HOST
         value: 0.0.0.0
+      - key: MOTION_KNOWLEDGE_REDIS_URL
+        sync: false
+      - key: MOTION_KNOWLEDGE_REDIS_TOKEN
+        sync: false
+      - key: MOTION_KNOWLEDGE_REDIS_KEY
+        value: motion-director:global-knowledge:v1
+      - key: MOTION_KNOWLEDGE_DEVELOPER_INSTALLATIONS
+        sync: false

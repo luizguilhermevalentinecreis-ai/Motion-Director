@@ -15,7 +15,7 @@ editing, solvers, validation, preview, and eventually rendering.
 4. **Motion engine** — planned local worker for retargeting, IK, contacts,
    trajectory optimization, curve cleanup, and Blender-headless integration.
 5. **Web relay** — optional public HTTPS command broker for Custom GPT Actions.
-   The Studio plugin polls it outbound and displays a temporary pairing code.
+   The Studio plugin polls it outbound and displays its locally registered user's connection code.
 
 The Studio plugin is intentionally not the MCP server. Roblox Studio can make
 HTTP requests, but it is not a general-purpose local listening server.
@@ -35,7 +35,7 @@ The Web relay has a separate security boundary:
 
 - no arbitrary Studio method or Luau endpoint;
 - a fixed action allowlist;
-- temporary pairing codes separate from 256-bit plugin tokens;
+- persistent personal connection codes separate from rotating 256-bit plugin tokens;
 - heartbeat and job expiration;
 - explicit write confirmation;
 - bounded body size and pending-job count.
