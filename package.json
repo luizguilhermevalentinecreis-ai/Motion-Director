@@ -1,6 +1,6 @@
 {
   "name": "roblox-motion-director",
-  "version": "0.6.1",
+  "version": "0.9.0",
   "private": true,
   "description": "Local-first MCP animation direction system for Roblox Studio",
   "type": "module",
@@ -8,7 +8,7 @@
     "build": "tsc -p tsconfig.json",
     "dev": "tsx src/index.ts",
     "relay:dev": "tsx src/web-relay-main.ts",
-    "start": "node dist/index.js",
+    "start": "node dist/src/index.js",
     "relay:start": "node dist/src/web-relay-main.js",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "node --test --import tsx test/**/*.test.ts",

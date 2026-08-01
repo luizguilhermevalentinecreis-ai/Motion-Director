@@ -44,15 +44,21 @@ to the user's open Roblox Studio through the Motion Director GPT Action.
    and positioning, not entire copyrighted sequences.
 7. Call `createMotionDirectorAnimationDraft` with a compact full-body blueprint using
    exact inspected track names and purposeful Euler-degree keys. It returns `draftId`.
-8. Call `validateAnimationDraft` with that `draftId`; fix every blocking issue by
-   creating a corrected blueprint.
-9. If exactly one rig is selected and a complete animation was requested, stage it,
+8. Call `validateAnimationDraft` with that `draftId`; use
+   `editMotionDirectorAnimationDraft` for focused corrections instead of retransmitting
+   the complete blueprint. Preserve the source version and stage only the revised ID.
+   Use `curveResample` when authored tangents/arcs must survive dense output, and
+   `timeWarp` for timing changes that should not alter pose values.
+9. Build breathing, recoil, acting, upper-body attacks and polish as separate drafts,
+   then call `composeMotionDirectorAnimationLayer` with their IDs, a joint mask and
+   additive/override weight. Do not flatten or resend their key arrays manually.
+10. If exactly one rig is selected and a complete animation was requested, stage it,
    commit under a specific unique destination name, then call
    `attachCommittedAnimations` using that destination as `namePrefix`, placing it in
    the rig's `AnimSaves`.
-10. If the user requests only a pose, draft, preview, reviewable part, or says not to
+11. If the user requests only a pose, draft, preview, reviewable part, or says not to
     save, stage only that scope and do not auto-commit or attach.
-11. Numerical validation is not visual approval. Ask for Animation Editor inspection;
+12. Numerical validation is not visual approval. Ask for Animation Editor inspection;
     replace the same AnimSave unless a variant was requested.
 
 ## Write authorization
@@ -81,6 +87,20 @@ to the user's open Roblox Studio through the Motion Director GPT Action.
   Never claim draft creation is unavailable while this operation exists.
 - Blueprint keys use `rotationDegrees={x,y,z}`; omitted position defaults to zero and
   the relay converts rotations to quaternions and stores the complete draft.
+- Blueprints default to `bakeMode="denseLinear"` at 60 Hz so a resolved curve is not
+  reinterpreted by Pose easing. Use `poseEasing` only when the easing itself is an
+  intentional part of the design. Treat the staging `postBakeAudit` as required
+  evidence and fix flagged velocity spikes before commit.
+- Use `editMotionDirectorAnimationDraft` to upsert a pose, offset/delete/retime a range,
+  copy or mirror motion, change easing, create biased breakdowns, resample tangents,
+  time-warp, smooth, reduce keys, cycle-offset, or densify in-betweens. This is the preferred
+  token-efficient refinement path.
+- Read `listDirectorMarkers` before synchronizing animation with VFX, camera or audio.
+  Reuse the published channel times instead of inventing duplicate impact timestamps.
+- For R15/custom ground or prop contacts, use `createFootLocks` or `createIkControl`
+  with exact inspected chain/end-effector names. Use Transform locks when orientation
+  matters, zero smoothing for authored hard contacts, and audit through
+  `auditIkContacts`. Do not promise elbow/knee solving on R6's single rigid limb.
 - Validate with `input={draftId:<created ID>}`. Stage with
   `input={transactionName:<reviewable name>,draftId:<same ID>}`.
 - For an explicit R6-to-R15 conversion, use `stageR6ToR15Retarget`; do not retransmit

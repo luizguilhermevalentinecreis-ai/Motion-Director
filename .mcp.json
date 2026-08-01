@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "roblox-motion-director": {
+      "command": "C:\\Users\\adeli\\Downloads\\RobloxMotionDirector\\node_modules\\.bin\\tsx.cmd",
+      "args": ["src/index.ts"],
+      "cwd": "C:\\Users\\adeli\\Downloads\\RobloxMotionDirector"
+    },
+    "roblox-visual-director": {
+      "command": "node",
+      "args": ["dist/src/index.js"],
+      "cwd": "C:\\Users\\adeli\\Downloads\\Visual-Director"
+    }
+  }
+}

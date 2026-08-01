@@ -77,6 +77,8 @@ export const animationDraftSchema = z.object({
   rigId: z.string().min(1),
   duration: z.number().positive().max(300),
   framesPerSecond: z.number().int().min(12).max(120).default(30),
+  bakeMode: z.enum(["denseLinear", "poseEasing"]).optional(),
+  bakeFramesPerSecond: z.number().int().min(12).max(240).optional(),
   looped: z.boolean().default(false),
   priority: z.enum(["core", "idle", "movement", "action", "action2", "action3", "action4"]),
   authoredHipHeight: z.number().optional(),

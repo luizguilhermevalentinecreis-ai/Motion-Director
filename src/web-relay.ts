@@ -1,7 +1,10 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { z } from "zod";
 import { animationDraftSchema, validateTemporalIntegrity, type AnimationDraft } from "./domain.js";
 import { animationBlueprintSchema, draftFromBlueprint } from "./draft-authoring.js";
+import { animationEditProgramSchema, applyAnimationEditProgram } from "./draft-editing.js";
+import { animationLayerOptionsSchema, composeAnimationLayer } from "./animation-layers.js";
 import {
   createGlobalKnowledgeStore,
   type GlobalKnowledgeStore,
@@ -13,8 +16,14 @@ type JsonObject = Record<string, unknown>;
 
 export type RelayActionName =
   | "createAnimationDraft"
+  | "editAnimationDraft"
   | "getAnimationCapabilities"
   | "getSceneSelection"
+  | "listDirectorMarkers"
+  | "createIkControl"
+  | "createFootLocks"
+  | "auditIkContacts"
+  | "removeIkControls"
   | "inspectRig"
   | "listAnimations"
   | "inspectAnimation"
@@ -26,6 +35,8 @@ export type RelayActionName =
   | "discardAnimationDraft"
   | "attachCommittedAnimations"
   | "poseCommittedAnimation"
+  | "createAnimationReviewGuides"
+  | "clearAnimationReviewGuides"
   | "resetRigPose";
 
 interface ActionDefinition {
@@ -36,8 +47,14 @@ interface ActionDefinition {
 
 const ACTIONS: Record<RelayActionName, ActionDefinition> = {
   createAnimationDraft: { write: false, timeoutMs: 10_000 },
+  editAnimationDraft: { write: false, timeoutMs: 10_000 },
   getAnimationCapabilities: { method: "system.capabilities", write: false, timeoutMs: 10_000 },
   getSceneSelection: { method: "scene.getSelection", write: false, timeoutMs: 30_000 },
+  listDirectorMarkers: { method: "timeline.listMarkers", write: false, timeoutMs: 15_000 },
+  createIkControl: { method: "animation.createIkControl", write: true, timeoutMs: 120_000 },
+  createFootLocks: { method: "animation.createFootLocks", write: true, timeoutMs: 120_000 },
+  auditIkContacts: { method: "animation.auditIkContacts", write: false, timeoutMs: 30_000 },
+  removeIkControls: { method: "animation.removeIkControls", write: true, timeoutMs: 120_000 },
   inspectRig: { method: "rig.inspect", write: false, timeoutMs: 30_000 },
   listAnimations: { method: "analysis.listAnimations", write: false, timeoutMs: 120_000 },
   inspectAnimation: { method: "analysis.inspectAnimation", write: false, timeoutMs: 180_000 },
@@ -61,6 +78,8 @@ const ACTIONS: Record<RelayActionName, ActionDefinition> = {
     write: true,
     timeoutMs: 120_000,
   },
+  createAnimationReviewGuides: { method: "animation.createReviewGuides", write: true, timeoutMs: 120_000 },
+  clearAnimationReviewGuides: { method: "animation.clearReviewGuides", write: true, timeoutMs: 30_000 },
   resetRigPose: { method: "animation.resetSelectedRigPose", write: true, timeoutMs: 120_000 },
 };
 
@@ -250,6 +269,8 @@ function animationDraftOpenApiSchema(): JsonObject {
         maximum: 120,
         default: 30,
       },
+      bakeMode: { type: "string", enum: ["denseLinear", "poseEasing"], default: "denseLinear" },
+      bakeFramesPerSecond: { type: "integer", minimum: 12, maximum: 240, default: 60 },
       looped: { type: "boolean", default: false },
       priority: {
         type: "string",
@@ -323,6 +344,8 @@ function animationBlueprintOpenApiSchema(): JsonObject {
       rigType: { type: "string", enum: ["R6", "R15", "Custom"] },
       duration: { type: "number", exclusiveMinimum: 0, maximum: 300 },
       framesPerSecond: { type: "integer", minimum: 12, maximum: 120, default: 30 },
+      bakeMode: { type: "string", enum: ["denseLinear", "poseEasing"], default: "denseLinear" },
+      bakeFramesPerSecond: { type: "integer", minimum: 12, maximum: 240, default: 60 },
       looped: { type: "boolean", default: false },
       priority: { type: "string", enum: ["core", "idle", "movement", "action", "action2", "action3", "action4"] },
       authoredHipHeight: { type: "number" },
@@ -377,6 +400,7 @@ function actionInputOpenApiSchema(): JsonObject {
           "Stored draft returned by createMotionDirectorAnimationDraft. validateAnimationDraft and stageAnimationDraft accept this instead of retransmitting input.draft.",
       },
       blueprint: animationBlueprintOpenApiSchema(),
+      program: z.toJSONSchema(animationEditProgramSchema, { target: "draft-2020-12" }) as JsonObject,
       draft: animationDraftOpenApiSchema(),
       transactionId: {
         type: "string",
@@ -466,6 +490,35 @@ function actionInputOpenApiSchema(): JsonObject {
         maximum: 1,
         description: "Normalized pose time used by poseCommittedAnimation.",
       },
+      normalizedTimes: {
+        type: "array", maxItems: 16, items: { type: "number", minimum: 0, maximum: 1 },
+        description: "Review times used to create Studio-native ghost poses.",
+      },
+      effectors: {
+        type: "array", maxItems: 16, items: { type: "string", minLength: 1, maxLength: 120 },
+        description: "Exact rig part names whose world-space trajectories should be visualized.",
+      },
+      ghostTransparency: { type: "number", minimum: 0.2, maximum: 0.95, default: 0.72 },
+      maxPathSamples: { type: "integer", minimum: 2, maximum: 240, default: 120 },
+      controlName: { type: "string", minLength: 1, maxLength: 120, description: "Unique IKControl name." },
+      chainRootName: { type: "string", minLength: 1, maxLength: 120, description: "Exact BasePart or Bone name at the root of the IK chain." },
+      endEffectorName: { type: "string", minLength: 1, maxLength: 120, description: "Exact foot, hand, part or bone name that must reach the target." },
+      controlType: { type: "string", enum: ["position", "transform"], default: "transform" },
+      targetPosition: { type: "object", required: ["x", "y", "z"], properties: { x: { type: "number" }, y: { type: "number" }, z: { type: "number" } }, additionalProperties: false },
+      targetRotationDegrees: { type: "object", required: ["x", "y", "z"], properties: { x: { type: "number" }, y: { type: "number" }, z: { type: "number" } }, additionalProperties: false },
+      poleName: { type: "string", maxLength: 120 },
+      weight: { type: "number", minimum: 0, maximum: 1, default: 1 },
+      smoothTime: { type: "number", minimum: 0, maximum: 2, default: 0 },
+      priority: { type: "integer", minimum: -100, maximum: 100, default: 0 },
+      contactKind: { type: "string", enum: ["footLock", "handLock", "aim", "prop", "custom"] },
+      feet: {
+        type: "array", maxItems: 8,
+        items: { type: "object", required: ["controlName", "chainRootName", "endEffectorName"], properties: {
+          controlName: { type: "string" }, chainRootName: { type: "string" }, endEffectorName: { type: "string" }, poleName: { type: "string" },
+        }, additionalProperties: false },
+      },
+      raycastDistance: { type: "number", minimum: 0.1, maximum: 100, default: 8 },
+      soleOffset: { type: "number", minimum: -2, maximum: 2, default: 0.05 },
       includeDescendants: { type: "boolean" },
       maxDepth: { type: "integer", minimum: 0, maximum: 30 },
       rig: { type: "string", description: "Rig path returned by scene inspection." },
@@ -641,6 +694,14 @@ export class MotionDirectorWebRelay {
       }
       if (request.method === "POST" && url.pathname === "/v1/drafts/create") {
         await this.actionCreateAnimationDraft(request, response);
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/v1/drafts/edit") {
+        await this.actionEditAnimationDraft(request, response);
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/v1/drafts/compose-layer") {
+        await this.actionComposeAnimationLayer(request, response);
         return;
       }
       if (request.method === "POST" && url.pathname === "/v1/actions/execute") {
@@ -880,6 +941,10 @@ export class MotionDirectorWebRelay {
     }
     if (action === "createAnimationDraft") {
       this.json(response, 200, this.createAnimationDraftResult(session, input.blueprint));
+      return;
+    }
+    if (action === "editAnimationDraft") {
+      this.json(response, 200, this.editAnimationDraftResult(session, input.draftId, input.program));
       return;
     }
     if (action === "validateAnimationDraft") {
@@ -1143,7 +1208,22 @@ export class MotionDirectorWebRelay {
         normalizedTime,
       };
     }
-    if (action === "resetRigPose") return {};
+    if (action === "createAnimationReviewGuides") {
+      const normalizedTimes = Array.isArray(input.normalizedTimes)
+        ? input.normalizedTimes.slice(0, 16).map(Number).filter((value) => Number.isFinite(value) && value >= 0 && value <= 1)
+        : [0, 0.25, 0.5, 0.75, 1];
+      const effectors = Array.isArray(input.effectors)
+        ? input.effectors.slice(0, 16).filter((value): value is string => typeof value === "string" && value.length > 0 && value.length <= 120)
+        : ["Head", "Right Arm", "Left Arm", "Right Leg", "Left Leg"];
+      return {
+        animationName: this.requiredString(input.animationName, "animationName", 120),
+        normalizedTimes,
+        effectors,
+        ghostTransparency: Math.min(0.95, Math.max(0.2, Number(input.ghostTransparency) || 0.72)),
+        maxPathSamples: Math.min(240, Math.max(2, Math.trunc(Number(input.maxPathSamples) || 120))),
+      };
+    }
+    if (action === "resetRigPose" || action === "clearAnimationReviewGuides") return {};
     return input;
   }
 
@@ -1322,6 +1402,75 @@ export class MotionDirectorWebRelay {
     };
   }
 
+  private async actionEditAnimationDraft(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const body = await this.readJson(request);
+    const code = normalizePairingCode(body.pairingCode);
+    const session = code ? this.sessionForPairingCode(code) : undefined;
+    if (!code || !session) {
+      this.json(response, 404, { error: "Pairing code is invalid, expired, or the Studio plugin is offline." });
+      return;
+    }
+    this.json(response, 200, this.editAnimationDraftResult(session, body.draftId, body.program));
+  }
+
+  private editAnimationDraftResult(session: PluginSession, draftIdValue: unknown, programValue: unknown): JsonObject {
+    const draftId = this.requiredString(draftIdValue, "draftId", 100);
+    const source = this.authoredDrafts.get(draftId);
+    if (!source || source.sessionId !== session.id) throw new Error("Unknown, expired, or unauthorized draftId for this Studio session.");
+    const program = animationEditProgramSchema.parse(programValue);
+    const draft = applyAnimationEditProgram(source.draft, program);
+    const problems = validateTemporalIntegrity(draft);
+    if (problems.length) throw new Error(problems.join("\n"));
+    const record: StoredAnimationDraft = {
+      id: randomUUID(), sessionId: session.id, pairingCode: session.pairingCode,
+      draft, createdAt: Date.now(), updatedAt: Date.now(),
+    };
+    this.authoredDrafts.set(record.id, record);
+    return {
+      status: "succeeded", draftId: record.id, sourceDraftId: draftId,
+      summary: {
+        name: draft.name, duration: draft.duration, operationCount: program.operations.length,
+        trackCount: draft.tracks.length, keyCount: draft.tracks.reduce((sum, track) => sum + track.keys.length, 0),
+      },
+      report: reviewDraft(draft),
+      next: "Validate and stage the returned draftId. The source draft remains unchanged.",
+    };
+  }
+
+  private async actionComposeAnimationLayer(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const body = await this.readJson(request);
+    const code = normalizePairingCode(body.pairingCode);
+    const session = code ? this.sessionForPairingCode(code) : undefined;
+    if (!code || !session) {
+      this.json(response, 404, { error: "Pairing code is invalid, expired, or the Studio plugin is offline." });
+      return;
+    }
+    const baseDraftId = this.requiredString(body.baseDraftId, "baseDraftId", 100);
+    const layerDraftId = this.requiredString(body.layerDraftId, "layerDraftId", 100);
+    const base = this.authoredDrafts.get(baseDraftId);
+    const layer = this.authoredDrafts.get(layerDraftId);
+    if (!base || !layer || base.sessionId !== session.id || layer.sessionId !== session.id) {
+      throw new Error("Unknown, expired, or unauthorized base/layer draft ID for this Studio session.");
+    }
+    const options = animationLayerOptionsSchema.parse(body.options);
+    const draft = composeAnimationLayer(base.draft, layer.draft, options);
+    const record: StoredAnimationDraft = {
+      id: randomUUID(), sessionId: session.id, pairingCode: session.pairingCode,
+      draft, createdAt: Date.now(), updatedAt: Date.now(),
+    };
+    this.authoredDrafts.set(record.id, record);
+    this.json(response, 200, {
+      status: "succeeded", draftId: record.id, baseDraftId, layerDraftId,
+      summary: {
+        name: draft.name, mode: options.mode, weight: options.weight,
+        trackCount: draft.tracks.length, keyCount: draft.tracks.reduce((sum, track) => sum + track.keys.length, 0),
+        sampleRate: draft.bakeFramesPerSecond,
+      },
+      report: reviewDraft(draft),
+      next: "Validate and stage the returned draftId. Both source drafts remain unchanged.",
+    });
+  }
+
   private draftFromInput(session: PluginSession, input: JsonObject): AnimationDraft {
     if (input.draft !== undefined) return animationDraftSchema.parse(input.draft);
     const draftId = this.requiredString(input.draftId, "draftId", 100);
@@ -1392,7 +1541,7 @@ export class MotionDirectorWebRelay {
       openapi: "3.1.0",
       info: {
         title: "Motion Director for Roblox Studio",
-        version: "0.6.1",
+        version: "0.9.0",
         description:
           "Pairs ChatGPT with Roblox Studio, executes bounded animation-authoring operations, and distributes developer-approved global animation knowledge.",
       },
@@ -1514,6 +1663,57 @@ export class MotionDirectorWebRelay {
               "400": { description: "Invalid blueprint or blocking draft issue." },
               "404": { description: "No paired Studio." },
             },
+          },
+        },
+        "/v1/drafts/edit": {
+          post: {
+            operationId: "editMotionDirectorAnimationDraft",
+            summary: "Apply precise partial editing operations to a stored animation draft.",
+            description:
+              "Creates a new draft version without retransmitting or mutating the source. Supports pose insertion, range offset/retime/delete, copying, mirroring, easing and in-between densification.",
+            requestBody: {
+              required: true,
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    required: ["pairingCode", "draftId", "program"],
+                    properties: {
+                      pairingCode: pairingSchema,
+                      draftId: { type: "string", format: "uuid" },
+                      program: z.toJSONSchema(animationEditProgramSchema, { target: "draft-2020-12" }) as JsonObject,
+                    },
+                    additionalProperties: false,
+                  },
+                },
+              },
+            },
+            responses: {
+              "200": { description: "New stored draft version and quality report." },
+              "400": { description: "Invalid edit program." },
+              "404": { description: "No paired Studio or unknown draft." },
+            },
+          },
+        },
+        "/v1/drafts/compose-layer": {
+          post: {
+            operationId: "composeMotionDirectorAnimationLayer",
+            summary: "Blend two stored drafts as a non-destructive animation layer.",
+            description: "References stored drafts by ID, applies an additive or override joint-masked layer locally, and returns a new dense-linear draft ID without retransmitting key arrays.",
+            requestBody: {
+              required: true,
+              content: { "application/json": { schema: {
+                type: "object", additionalProperties: false,
+                required: ["pairingCode", "baseDraftId", "layerDraftId", "options"],
+                properties: {
+                  pairingCode: pairingSchema,
+                  baseDraftId: { type: "string", format: "uuid" },
+                  layerDraftId: { type: "string", format: "uuid" },
+                  options: z.toJSONSchema(animationLayerOptionsSchema, { target: "draft-2020-12" }) as JsonObject,
+                },
+              } } },
+            },
+            responses: { "200": { description: "New layered draft ID and quality report." }, "400": { description: "Invalid layer options." }, "404": { description: "No paired Studio or unknown draft." } },
           },
         },
         "/v1/actions/execute": {

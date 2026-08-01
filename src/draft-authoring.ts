@@ -30,6 +30,8 @@ export const animationBlueprintSchema = z.object({
   rigType: z.enum(["R6", "R15", "Custom"]),
   duration: z.number().positive().max(300),
   framesPerSecond: z.number().int().min(12).max(120).default(30),
+  bakeMode: z.enum(["denseLinear", "poseEasing"]).default("denseLinear"),
+  bakeFramesPerSecond: z.number().int().min(12).max(240).default(60),
   looped: z.boolean().default(false),
   priority: z.enum(["core", "idle", "movement", "action", "action2", "action3", "action4"]),
   authoredHipHeight: z.number().optional(),
@@ -71,6 +73,8 @@ export function draftFromBlueprint(value: unknown): AnimationDraft {
     rigId: blueprint.rigId,
     duration: blueprint.duration,
     framesPerSecond: blueprint.framesPerSecond,
+    bakeMode: blueprint.bakeMode,
+    bakeFramesPerSecond: blueprint.bakeFramesPerSecond,
     looped: blueprint.looped,
     priority: blueprint.priority,
     ...(blueprint.authoredHipHeight === undefined

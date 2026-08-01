@@ -151,10 +151,26 @@ test("creates a compact authored draft and stages it by draftId", async () => {
     assert.match(created.draftId, /^[0-9a-f-]{36}$/);
     assert.equal(created.summary.keyCount, 4);
 
+    const editResponse = await post(baseUrl, "/v1/drafts/edit", {
+      pairingCode: connection.pairingCode,
+      draftId: created.draftId,
+      program: {
+        name: "Push the striking arm forward",
+        operations: [{
+          op: "offsetRange", joints: ["Right Arm"], startTime: 0.2, endTime: 0.4,
+          positionDelta: { x: 0, y: 0, z: -0.4 }, rotationDegreesDelta: { x: -12, y: 0, z: 0 },
+        }],
+      },
+    });
+    assert.equal(editResponse.status, 200);
+    const edited = (await editResponse.json()) as { draftId: string; sourceDraftId: string };
+    assert.notEqual(edited.draftId, created.draftId);
+    assert.equal(edited.sourceDraftId, created.draftId);
+
     const validateResponse = await post(baseUrl, "/v1/actions/execute", {
       pairingCode: connection.pairingCode,
       action: "validateAnimationDraft",
-      input: { draftId: created.draftId },
+      input: { draftId: edited.draftId },
     });
     assert.equal(validateResponse.status, 200);
 
@@ -162,7 +178,7 @@ test("creates a compact authored draft and stages it by draftId", async () => {
       pairingCode: connection.pairingCode,
       action: "stageAnimationDraft",
       confirmWrite: true,
-      input: { transactionName: "M1_01 review", draftId: created.draftId },
+      input: { transactionName: "M1_01 review", draftId: edited.draftId },
     });
     assert.equal(stageResponse.status, 202);
 
@@ -488,12 +504,14 @@ test("serves a GPT-compatible OpenAPI document and privacy policy", async () => 
       >;
     };
     assert.equal(document.openapi, "3.1.0");
-    assert.equal(document.info.version, "0.6.1");
+    assert.equal(document.info.version, "0.9.0");
     assert.equal(document.servers[0]?.url, baseUrl);
     assert.ok(document.paths["/v1/knowledge/global"]);
     assert.ok(document.paths["/v1/knowledge/propose"]);
     assert.ok(document.paths["/v1/actions/execute"]);
     assert.ok(document.paths["/v1/drafts/create"]);
+    assert.ok(document.paths["/v1/drafts/edit"]);
+    assert.ok(document.paths["/v1/drafts/compose-layer"]);
     const actionInput =
       document.paths["/v1/actions/execute"]?.post?.requestBody?.content?.["application/json"]
         ?.schema?.properties?.input?.properties;

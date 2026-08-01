@@ -1,0 +1,9 @@
+node_modules
+dist
+.git
+*.rbxl*
+*.rbxm
+*.rbxmx
+docs
+scripts
+test

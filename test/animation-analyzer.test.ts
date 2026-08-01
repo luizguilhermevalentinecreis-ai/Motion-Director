@@ -13,7 +13,7 @@ test("exposes the animation analyzer through plugin and MCP commands", async () 
     readFile(serverPath, "utf8"),
   ]);
 
-  assert.match(plugin, /parentSpaceBakerVersion = 7/);
+  assert.match(plugin, /parentSpaceBakerVersion = 8/);
   assert.match(plugin, /animationAnalyzerVersion = 2/);
   assert.match(plugin, /analysis\.listAnimations/);
   assert.match(plugin, /analysis\.inspectAnimation/);

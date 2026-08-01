@@ -11,8 +11,7 @@ export function reviewDraft(draft: AnimationDraft): QualityReport {
   const styles = new Set(draft.metadata.style);
   const usesR6CombatDisplacement =
     rigType === "R6" &&
-    draft.priority.startsWith("action") &&
-    styles.has("r6-combat-displacement");
+    draft.priority.startsWith("action");
   const usesR6ExtremeSkillDisplacement =
     usesR6CombatDisplacement && styles.has("r6-anime-extreme-displacement");
   const usesR6LocomotionDisplacement =

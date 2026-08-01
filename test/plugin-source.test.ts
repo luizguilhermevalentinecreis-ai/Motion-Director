@@ -24,7 +24,7 @@ test("plugin inspects and bakes both legacy and upgraded R15 animation joints", 
   assert.match(source, /avatarJointUpgrade = #animationConstraints > 0/);
   assert.match(source, /trackName = descendant\.Part1 and descendant\.Part1\.Name/);
   assert.match(source, /attachment0 = descendant\.Attachment0/);
-  assert.match(source, /parentSpaceBakerVersion = 7/);
+  assert.match(source, /parentSpaceBakerVersion = 8/);
   assert.match(source, /animationAnalyzerVersion = 2/);
 });
 
@@ -56,6 +56,23 @@ test("plugin exposes developer approval for global knowledge", async () => {
   assert.match(source, /COMMIT GLOBAL/);
   assert.match(source, /\/plugin\/knowledge\/resolve/);
   assert.match(source, /knowledgeRole == "developer"/);
+});
+
+test("plugin publishes committed timing to the shared director marker bus", async () => {
+  const source = await readFile(pluginSourceUrl, "utf8");
+  assert.match(source, /DirectorMarkerBus/);
+  assert.match(source, /publishSequenceMarkers\(committed, params\.destinationName\)/);
+  assert.match(source, /handlers\["timeline\.listMarkers"\]/);
+});
+
+test("plugin exposes native IK, raycast foot locks and contact error auditing", async () => {
+  const source = await readFile(pluginSourceUrl, "utf8");
+  assert.match(source, /handlers\["animation\.createIkControl"\]/);
+  assert.match(source, /Instance\.new\("IKControl"\)/);
+  assert.match(source, /handlers\["animation\.createFootLocks"\]/);
+  assert.match(source, /workspace:Raycast/);
+  assert.match(source, /handlers\["animation\.auditIkContacts"\]/);
+  assert.match(source, /errorStuds = errorDistance/);
 });
 
 test("plugin retargets complete R6 sequences through world space and neutral rebasing", async () => {

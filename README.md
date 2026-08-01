@@ -21,6 +21,10 @@ without an AI-provider API key.
 - rig-aware world-space resampling at up to 120 FPS;
 - center-of-mass, support, velocity, path, angular-speed, and root-relative support-travel metrics;
 - normalized phase-aware comparison between two animation clips.
+- cubic-Hermite/Catmull-Rom curve resampling, time warps and tangent-preserving dense output;
+- additive/override animation-layer composition by stored draft IDs and joint masks;
+- Studio-native ghosting, motion paths and a shared director marker bus.
+- native R15/custom `IKControl` authoring, raycast-aligned foot locks and live contact-error auditing.
 
 The relay now exposes a first-class draft-authoring operation. GPTs can submit a
 compact full-body blueprint, receive a short-lived `draftId`, then validate and
@@ -30,6 +34,8 @@ stage the complete generated `AnimationDraft` without retransmitting it.
 
 ```powershell
 npm install
+# If npm 11 blocks esbuild/tsx lifecycle scripts, review and allow esbuild with:
+# npm approve-scripts
 npm run check
 npm test
 npm run build

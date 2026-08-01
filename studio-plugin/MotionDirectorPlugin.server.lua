@@ -14,7 +14,7 @@ local R6ToR15Retargeter = require(script.Parent:WaitForChild("R6ToR15Retargeter"
 local LOCAL_BRIDGE_URL = "http://127.0.0.1:34718"
 local DEFAULT_CHATGPT_RELAY_URL = "https://motion-director-relay.onrender.com"
 local PAIRING_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-local PLUGIN_VERSION = "0.6.0"
+local PLUGIN_VERSION = "0.9.0"
 local HEADER = { ["x-roblox-motion-bridge"] = "1", ["content-type"] = "application/json" }
 
 local savedRelayUrl = plugin:GetSetting("MotionDirectorRelayUrl")
@@ -22,7 +22,9 @@ local relayBridgeUrl = if type(savedRelayUrl) == "string" and savedRelayUrl ~= "
 	then savedRelayUrl:gsub("/+$", "")
 	else DEFAULT_CHATGPT_RELAY_URL
 local savedMode = plugin:GetSetting("MotionDirectorBridgeMode")
-local bridgeMode = if savedMode == "chatgpt" then "chatgpt" else "local"
+local remoteDisclosureAccepted = plugin:GetSetting("MotionDirectorRemoteDisclosureAcceptedV1") == true
+local bridgeMode = if savedMode == "chatgpt" and remoteDisclosureAccepted then "chatgpt" else "local"
+local remoteDisclosureArmed = false
 local installationId = plugin:GetSetting("MotionDirectorInstallationId")
 if type(installationId) ~= "string" or installationId == "" then
 	installationId = HttpService:GenerateGUID(false)
@@ -301,6 +303,10 @@ end)
 
 local running = true
 local activePreviewTracks: { AnimationTrack } = {}
+local editPreviewGeneration = 0
+local editPoseStates = {}
+local applyKeyframePose: (Model, Keyframe) -> number
+local sequenceDuration: (KeyframeSequence) -> number
 
 local function updateKnowledgeUi()
 	local developerActive = bridgeMode == "chatgpt" and knowledgeRole == "developer"
@@ -350,6 +356,8 @@ local function resetConnection()
 end
 
 localModeButton.MouseButton1Click:Connect(function()
+	remoteDisclosureArmed = false
+	chatGptModeButton.Text = "CHATGPT WEB"
 	bridgeMode = "local"
 	plugin:SetSetting("MotionDirectorBridgeMode", bridgeMode)
 	resetConnection()
@@ -357,6 +365,18 @@ localModeButton.MouseButton1Click:Connect(function()
 end)
 
 chatGptModeButton.MouseButton1Click:Connect(function()
+	if not remoteDisclosureAccepted and not remoteDisclosureArmed then
+		remoteDisclosureArmed = true
+		chatGptModeButton.Text = "CONFIRM METADATA SEND"
+		explanation.Text = "Remote mode sends installationId, Roblox Studio user/creator id, placeId, placeName and plugin version to the displayed relay about every 0.5s while connected. Click again to consent."
+		return
+	end
+	if not remoteDisclosureAccepted then
+		remoteDisclosureAccepted = true
+		plugin:SetSetting("MotionDirectorRemoteDisclosureAcceptedV1", true)
+	end
+	remoteDisclosureArmed = false
+	chatGptModeButton.Text = "CHATGPT WEB"
 	bridgeMode = "chatgpt"
 	plugin:SetSetting("MotionDirectorBridgeMode", bridgeMode)
 	resetConnection()
@@ -754,6 +774,26 @@ local function exactKeyAt(track: Dictionary, time: number): Dictionary?
 	return nil
 end
 
+local function sampledKeyAt(track: Dictionary, time: number): Dictionary?
+	local before = nil
+	local after = nil
+	for _, key in track.keys do
+		if key.time <= time and (not before or key.time > before.time) then before = key end
+		if key.time >= time and (not after or key.time < after.time) then after = key end
+	end
+	if not before and not after then return nil end
+	before = before or after
+	after = after or before
+	if time < before.time or time > after.time then return nil end
+	local span = after.time - before.time
+	local alpha = if span <= 0 then 0 else (time - before.time) / span
+	return {
+		cframe = cframeFromTransform(before.transform):Lerp(cframeFromTransform(after.transform), alpha),
+		weight = (before.weight or 1) + ((after.weight or 1) - (before.weight or 1)) * alpha,
+		easing = { style = "linear", direction = "inOut" },
+	}
+end
+
 local function createSequence(draft: Dictionary, rig: Model): KeyframeSequence
 	local sequence = Instance.new("KeyframeSequence")
 	sequence.Name = draft.name
@@ -765,6 +805,8 @@ local function createSequence(draft: Dictionary, rig: Model): KeyframeSequence
 	sequence:SetAttribute("MotionDirectorVersion", 1)
 	sequence:SetAttribute("Intent", draft.metadata and draft.metadata.intent or "")
 	sequence:SetAttribute("FramesPerSecond", draft.framesPerSecond)
+	sequence:SetAttribute("BakeMode", draft.bakeMode or "denseLinear")
+	sequence:SetAttribute("BakeFramesPerSecond", draft.bakeFramesPerSecond or 60)
 	local styles = if draft.metadata and type(draft.metadata.style) == "table"
 		then draft.metadata.style
 		else {}
@@ -786,15 +828,21 @@ local function createSequence(draft: Dictionary, rig: Model): KeyframeSequence
 		end
 	end
 
-	local uniqueTimes: { [number]: boolean } = {}
-	for _, track in draft.tracks do
-		for _, key in track.keys do
-			uniqueTimes[key.time] = true
-		end
-	end
 	local times = {}
-	for time in uniqueTimes do
-		table.insert(times, time)
+	if (draft.bakeMode or "denseLinear") == "denseLinear" then
+		local step = 1 / (draft.bakeFramesPerSecond or 60)
+		local time = 0
+		while time < draft.duration - 0.000001 do
+			table.insert(times, time)
+			time += step
+		end
+		table.insert(times, draft.duration)
+	else
+		local uniqueTimes: { [number]: boolean } = {}
+		for _, track in draft.tracks do
+			for _, key in track.keys do uniqueTimes[key.time] = true end
+		end
+		for time in uniqueTimes do table.insert(times, time) end
 	end
 	table.sort(times)
 
@@ -822,10 +870,12 @@ local function createSequence(draft: Dictionary, rig: Model): KeyframeSequence
 		end
 
 		for _, track in draft.tracks do
-			local key = exactKeyAt(track, time)
+			local key = if (draft.bakeMode or "denseLinear") == "denseLinear"
+				then sampledKeyAt(track, time)
+				else exactKeyAt(track, time)
 			if key then
 				local pose = poseFor(track.joint)
-				local authored = cframeFromTransform(key.transform)
+				local authored = key.cframe or cframeFromTransform(key.transform)
 				if track.space == "parent" then
 					local animationJoint = nil
 					for _, descendant in rig:GetDescendants() do
@@ -897,14 +947,236 @@ end
 
 local handlers: { [string]: (Dictionary) -> any } = {}
 
+local function publishSequenceMarkers(sequence: KeyframeSequence, sourceName: string)
+	local bus = ensureFolder(ReplicatedStorage, "DirectorMarkerBus")
+	local folderName = "Motion_" .. sourceName
+	local existing = bus:FindFirstChild(folderName)
+	if existing then existing:Destroy() end
+	local channel = Instance.new("Folder")
+	channel.Name = folderName
+	channel:SetAttribute("SourceType", "Motion")
+	channel:SetAttribute("SourceName", sourceName)
+	channel:SetAttribute("Duration", sequence:GetKeyframes()[#sequence:GetKeyframes()] and sequence:GetKeyframes()[#sequence:GetKeyframes()].Time or 0)
+	channel.Parent = bus
+	local count = 0
+	for _, child in sequence:GetChildren() do
+		if child:IsA("StringValue") and (child.Name:match("^Beat_") or child.Name:match("^Contact_")) then
+			local ok, decoded = pcall(function() return HttpService:JSONDecode(child.Value) end)
+			if ok and type(decoded) == "table" then
+				local markerType = if child.Name:match("^Contact_") then "contact" else "beat"
+				for _, boundary in { "startTime", "endTime" } do
+					if type(decoded[boundary]) == "number" then
+						local marker = Instance.new("NumberValue")
+						marker.Name = child.Name .. "_" .. boundary
+						marker.Value = decoded[boundary]
+						marker:SetAttribute("Type", markerType)
+						marker:SetAttribute("Boundary", boundary)
+						marker:SetAttribute("Label", decoded.label or decoded.id or child.Name)
+						marker.Parent = channel
+						count += 1
+					end
+				end
+			end
+		end
+	end
+	channel:SetAttribute("MarkerCount", count)
+	return channel
+end
+
+local function listDirectorMarkers()
+	local bus = ReplicatedStorage:FindFirstChild("DirectorMarkerBus")
+	local channels = {}
+	if not bus then return { channels = channels, channelCount = 0, markerCount = 0 } end
+	local total = 0
+	for _, channel in bus:GetChildren() do
+		local markers = {}
+		for _, child in channel:GetChildren() do
+			if child:IsA("NumberValue") then
+				table.insert(markers, { id = child.Name, time = child.Value, type = child:GetAttribute("Type"), label = child:GetAttribute("Label") })
+			end
+		end
+		table.sort(markers, function(a, b) return a.time < b.time end)
+		total += #markers
+		table.insert(channels, { name = channel.Name, sourceType = channel:GetAttribute("SourceType"), sourceName = channel:GetAttribute("SourceName"), duration = channel:GetAttribute("Duration"), markers = markers })
+	end
+	return { channels = channels, channelCount = #channels, markerCount = total }
+end
+
+local function rigObjectByName(rig: Model, name: string): Instance?
+	if rig.Name == name then return rig end
+	for _, descendant in rig:GetDescendants() do
+		if descendant.Name == name and (descendant:IsA("BasePart") or descendant:IsA("Bone") or descendant:IsA("Attachment")) then
+			return descendant
+		end
+	end
+	return nil
+end
+
+local function ikHost(rig: Model): Instance
+	local host = rig:FindFirstChildOfClass("Humanoid") or rig:FindFirstChildOfClass("AnimationController")
+	if not host then error("The selected rig needs a Humanoid or AnimationController for IKControl.") end
+	if not host:FindFirstChildOfClass("Animator") then
+		local animator = Instance.new("Animator")
+		animator.Parent = host
+	end
+	return host
+end
+
+local function createIkControl(rig: Model, params: Dictionary, target: Instance): IKControl
+	local chainRoot = rigObjectByName(rig, params.chainRootName)
+	local endEffector = rigObjectByName(rig, params.endEffectorName)
+	if not chainRoot then error("IK chain root was not found: " .. tostring(params.chainRootName)) end
+	if not endEffector then error("IK end effector was not found: " .. tostring(params.endEffectorName)) end
+	local host = ikHost(rig)
+	local existing = host:FindFirstChild(params.controlName)
+	if existing then existing:Destroy() end
+	local control = Instance.new("IKControl")
+	control.Name = params.controlName
+	control.Type = if params.controlType == "position" then Enum.IKControlType.Position else Enum.IKControlType.Transform
+	control.ChainRoot = chainRoot
+	control.EndEffector = endEffector
+	control.Target = target
+	control.Weight = math.clamp(params.weight or 1, 0, 1)
+	control.SmoothTime = math.clamp(params.smoothTime or 0, 0, 2)
+	control.Priority = math.floor(params.priority or 0)
+	if type(params.poleName) == "string" and params.poleName ~= "" then
+		local pole = rigObjectByName(rig, params.poleName)
+		if pole then control.Pole = pole end
+	end
+	control:SetAttribute("MotionDirectorControl", true)
+	control:SetAttribute("ContactKind", params.contactKind or "custom")
+	control.Parent = host
+	return control
+end
+
+local function controlTargetsFolder(): Folder
+	return ensureFolder(workspace, "MotionDirectorControlTargets")
+end
+
+local function targetPart(name: string, cframe: CFrame): BasePart
+	local folder = controlTargetsFolder()
+	local existing = folder:FindFirstChild(name)
+	if existing then existing:Destroy() end
+	local part = Instance.new("Part")
+	part.Name = name
+	part.Size = Vector3.new(0.18, 0.18, 0.18)
+	part.CFrame = cframe
+	part.Anchored = true
+	part.CanCollide = false
+	part.CanQuery = false
+	part.CanTouch = false
+	part.Transparency = 0.65
+	part.Material = Enum.Material.Neon
+	part.Color = Color3.fromRGB(85, 220, 255)
+	part:SetAttribute("MotionDirectorTarget", true)
+	part.Parent = folder
+	return part
+end
+
+handlers["animation.createIkControl"] = function(params)
+	return withRecording("Create Motion Director IK control", function()
+		local rig = selectedRig()
+		if not rig then error("Select the target rig before creating IK.") end
+		local position = params.targetPosition or {}
+		local rotation = params.targetRotationDegrees or {}
+		local target = targetPart(
+			params.controlName .. "_Target",
+			CFrame.new(position.x or 0, position.y or 0, position.z or 0)
+				* CFrame.fromOrientation(math.rad(rotation.x or 0), math.rad(rotation.y or 0), math.rad(rotation.z or 0))
+		)
+		local control = createIkControl(rig, params, target)
+		return { status = "created", rig = pathOf(rig), control = pathOf(control), target = pathOf(target), chainCount = control:GetChainCount(), chainLength = control:GetChainLength() }
+	end)
+end
+
+handlers["animation.createFootLocks"] = function(params)
+	return withRecording("Create Motion Director foot locks", function()
+		local rig = selectedRig()
+		if not rig then error("Select the target rig before creating foot locks.") end
+		local rayParams = RaycastParams.new()
+		rayParams.FilterType = Enum.RaycastFilterType.Exclude
+		rayParams.FilterDescendantsInstances = { rig, controlTargetsFolder() }
+		local specs = params.feet or {
+			{ controlName = "MD_LeftFootLock", chainRootName = "LeftUpperLeg", endEffectorName = "LeftFoot" },
+			{ controlName = "MD_RightFootLock", chainRootName = "RightUpperLeg", endEffectorName = "RightFoot" },
+		}
+		local created = {}
+		for _, spec in specs do
+			local effector = rigObjectByName(rig, spec.endEffectorName)
+			if not effector or not effector:IsA("BasePart") then error("Foot end effector must be a BasePart: " .. tostring(spec.endEffectorName)) end
+			local result = workspace:Raycast(effector.Position + Vector3.new(0, 1, 0), Vector3.new(0, -(params.raycastDistance or 8), 0), rayParams)
+			if not result then error("No ground found below " .. effector.Name) end
+			local forward = effector.CFrame.LookVector - result.Normal * effector.CFrame.LookVector:Dot(result.Normal)
+			if forward.Magnitude < 1e-4 then forward = Vector3.new(0, 0, -1) end
+			local target = targetPart(spec.controlName .. "_Target", CFrame.lookAt(result.Position + result.Normal * (params.soleOffset or 0.05), result.Position + forward, result.Normal))
+			local controlParams = {
+				controlName = spec.controlName, chainRootName = spec.chainRootName, endEffectorName = spec.endEffectorName,
+				controlType = "transform", weight = params.weight or 1, smoothTime = params.smoothTime or 0,
+				priority = params.priority or 20, poleName = spec.poleName, contactKind = "footLock",
+			}
+			local control = createIkControl(rig, controlParams, target)
+			table.insert(created, { control = control.Name, target = target.Name, ground = result.Instance:GetFullName(), distance = (effector.Position - result.Position).Magnitude })
+		end
+		return { status = "created", rig = pathOf(rig), locks = created, count = #created }
+	end)
+end
+
+handlers["animation.auditIkContacts"] = function(_params)
+	local rig = selectedRig()
+	if not rig then error("Select the rig whose IK contacts should be audited.") end
+	local host = ikHost(rig)
+	local controls = {}
+	local worst = 0
+	for _, child in host:GetChildren() do
+		if child:IsA("IKControl") and child:GetAttribute("MotionDirectorControl") == true then
+			local effector = child.EndEffector
+			local target = child.Target
+			local effectorPosition = if effector:IsA("BasePart") then effector.Position else if effector:IsA("Attachment") or effector:IsA("Bone") then effector.WorldPosition else Vector3.zero
+			local targetPosition = if target:IsA("BasePart") then target.Position else if target:IsA("Attachment") or target:IsA("Bone") then target.WorldPosition else Vector3.zero
+			local errorDistance = (effectorPosition - targetPosition).Magnitude
+			worst = math.max(worst, errorDistance)
+			table.insert(controls, { name = child.Name, kind = child:GetAttribute("ContactKind"), enabled = child.Enabled, weight = child.Weight, errorStuds = errorDistance, chainCount = child:GetChainCount(), chainLength = child:GetChainLength() })
+		end
+	end
+	return { rig = pathOf(rig), controls = controls, count = #controls, worstErrorStuds = worst, status = if worst <= 0.03 then "locked" else if worst <= 0.12 then "warning" else "failing" }
+end
+
+handlers["animation.removeIkControls"] = function(_params)
+	return withRecording("Remove Motion Director IK controls", function()
+		local rig = selectedRig()
+		if not rig then error("Select the rig whose Motion Director IK should be removed.") end
+		local host = ikHost(rig)
+		local removed = 0
+		for _, child in host:GetChildren() do
+			if child:IsA("IKControl") and child:GetAttribute("MotionDirectorControl") == true then child:Destroy(); removed += 1 end
+		end
+		local targets = workspace:FindFirstChild("MotionDirectorControlTargets")
+		if targets then
+			for _, child in targets:GetChildren() do if child:GetAttribute("MotionDirectorTarget") == true then child:Destroy() end end
+		end
+		return { status = "removed", controls = removed }
+	end)
+end
+
 handlers["system.capabilities"] = function(_params)
 	return {
 		pluginVersion = PLUGIN_VERSION,
-		parentSpaceBakerVersion = 7,
+		parentSpaceBakerVersion = 8,
 		animationAnalyzerVersion = 2,
 		r6ToR15RetargeterVersion = 1,
 		autoCreateAnimator = true,
 		synchronizedMultiRig = true,
+		denseLinearBake = true,
+		postBakeContinuityAudit = true,
+		editModeFkPreview = true,
+		ghostingReview = true,
+		motionPathReview = true,
+		animationLayers = true,
+		curveResampling = true,
+		directorMarkerBus = true,
+		nativeIkControls = true,
+		footAndHandContactLocks = true,
+		contactErrorAudit = true,
 		isRunning = RunService:IsRunning(),
 		animationJointTypes = { "Motor6D", "AnimationConstraint", "Bone" },
 		rigProfiles = { "R6", "R15", "Custom" },
@@ -1067,6 +1339,64 @@ handlers["scene.createTestRig"] = function(params)
 	end)
 end
 
+local function auditBakedSequence(sequence: KeyframeSequence): Dictionary
+	local keyframes = sequence:GetKeyframes()
+	table.sort(keyframes, function(a, b) return a.Time < b.Time end)
+	local samplesByJoint: { [string]: { Dictionary } } = {}
+	for _, keyframe in keyframes do
+		for _, descendant in keyframe:GetDescendants() do
+			if descendant:IsA("Pose") and descendant.Weight > 0 then
+				local samples = samplesByJoint[descendant.Name] or {}
+				table.insert(samples, { time = keyframe.Time, cframe = descendant.CFrame })
+				samplesByJoint[descendant.Name] = samples
+			end
+		end
+	end
+	local joints = {}
+	local flagged = {}
+	for joint, samples in samplesByJoint do
+		local angularSpeeds = {}
+		local linearSpeeds = {}
+		for index = 2, #samples do
+			local previous, current = samples[index - 1], samples[index]
+			local dt = current.time - previous.time
+			if dt > 0.000001 then
+				local delta = previous.cframe:ToObjectSpace(current.cframe)
+				local _, angle = delta:ToAxisAngle()
+				table.insert(angularSpeeds, math.deg(math.abs(angle)) / dt)
+				table.insert(linearSpeeds, delta.Position.Magnitude / dt)
+			end
+		end
+		table.sort(angularSpeeds)
+		table.sort(linearSpeeds)
+		local medianAngular = angularSpeeds[math.max(1, math.ceil(#angularSpeeds / 2))] or 0
+		local maxAngular = angularSpeeds[#angularSpeeds] or 0
+		local medianLinear = linearSpeeds[math.max(1, math.ceil(#linearSpeeds / 2))] or 0
+		local maxLinear = linearSpeeds[#linearSpeeds] or 0
+		local angularSpikeRatio = maxAngular / math.max(20, medianAngular)
+		local linearSpikeRatio = maxLinear / math.max(0.1, medianLinear)
+		local entry = {
+			joint = joint, sampleCount = #samples, maxAngularDegreesPerSecond = maxAngular,
+			medianAngularDegreesPerSecond = medianAngular, angularSpikeRatio = angularSpikeRatio,
+			maxLinearStudsPerSecond = maxLinear, medianLinearStudsPerSecond = medianLinear,
+			linearSpikeRatio = linearSpikeRatio,
+		}
+		table.insert(joints, entry)
+		if (maxAngular > 360 and angularSpikeRatio > 2.75) or (maxLinear > 4 and linearSpikeRatio > 3.5) then
+			table.insert(flagged, entry)
+		end
+	end
+	table.sort(flagged, function(a, b) return a.angularSpikeRatio > b.angularSpikeRatio end)
+	return {
+		bakeMode = sequence:GetAttribute("BakeMode"),
+		bakeFramesPerSecond = sequence:GetAttribute("BakeFramesPerSecond"),
+		keyframeCount = #keyframes,
+		continuityPassed = #flagged == 0,
+		flaggedJoints = flagged,
+		joints = joints,
+	}
+end
+
 handlers["animation.stageDraft"] = function(params)
 	return withRecording("Stage Motion Director draft", function()
 		local rig = selectedRigAt(params.selectionIndex)
@@ -1092,6 +1422,7 @@ handlers["animation.stageDraft"] = function(params)
 			sequencePath = pathOf(sequence),
 			keyframeCount = #sequence:GetKeyframes(),
 			status = "staged",
+			postBakeAudit = auditBakedSequence(sequence),
 		}
 	end)
 end
@@ -1180,6 +1511,7 @@ handlers["animation.commitMultiRig"] = function(params)
 					local committed = sequence:Clone()
 					committed.Name = actorFolder.Name
 					committed.Parent = encounter
+					publishSequenceMarkers(committed, params.destinationName .. "_" .. actorFolder.Name)
 					table.insert(actors, {
 						actorId = actorFolder.Name,
 						path = pathOf(committed),
@@ -1218,6 +1550,7 @@ handlers["animation.commitDraft"] = function(params)
 		committed.Name = params.destinationName
 		committed:SetAttribute("CommittedFromTransaction", params.transactionId)
 		committed.Parent = destination
+		publishSequenceMarkers(committed, params.destinationName)
 		transaction:Destroy()
 		return {
 			status = "committed",
@@ -1227,12 +1560,48 @@ handlers["animation.commitDraft"] = function(params)
 	end)
 end
 
+handlers["timeline.listMarkers"] = function(_params)
+	return listDirectorMarkers()
+end
+
 local function stopActivePreviews()
+	editPreviewGeneration += 1
 	for _, activeTrack in activePreviewTracks do
 		activeTrack:Stop(0)
 		activeTrack:Destroy()
 	end
 	table.clear(activePreviewTracks)
+end
+
+local function playSequenceEditMode(sequence: KeyframeSequence, params: Dictionary, rig: Model): Dictionary
+	stopActivePreviews()
+	local generation = editPreviewGeneration
+	local keyframes = sequence:GetKeyframes()
+	table.sort(keyframes, function(a, b) return a.Time < b.Time end)
+	if #keyframes == 0 then error("The sequence has no keyframes.") end
+	local duration = sequenceDuration(sequence)
+	local speed = params.playbackSpeed or 1
+	task.spawn(function()
+		repeat
+			local started = os.clock()
+			repeat
+				if generation ~= editPreviewGeneration then return end
+				local time = math.min(duration, (os.clock() - started) * speed)
+				local nearest = keyframes[1]
+				local distance = math.huge
+				for _, keyframe in keyframes do
+					local currentDistance = math.abs(keyframe.Time - time)
+					if currentDistance < distance then nearest, distance = keyframe, currentDistance end
+				end
+				applyKeyframePose(rig, nearest)
+				task.wait()
+			until time >= duration
+		until params.looped ~= true or generation ~= editPreviewGeneration
+	end)
+	return {
+		status = "playing-edit-mode-fk", sequence = sequence.Name, length = duration,
+		speed = speed, looped = params.looped == true, reviewMethod = "anchored Part.CFrame FK",
+	}
 end
 
 local function loadSequenceTrack(
@@ -1268,11 +1637,12 @@ local function loadSequenceTrack(
 end
 
 local function playSequence(sequence: KeyframeSequence, params: Dictionary, targetRig: Model?): Dictionary
-	stopActivePreviews()
 	local rig = targetRig or selectedRigAt(params.selectionIndex)
 	if not rig then
 		error("Select the animation's target rig before previewing.")
 	end
+	if not RunService:IsRunning() then return playSequenceEditMode(sequence, params, rig) end
+	stopActivePreviews()
 	local track = loadSequenceTrack(sequence, rig, params)
 	track:Play(0.12, 1, params.playbackSpeed or 1)
 	return {
@@ -1579,6 +1949,16 @@ local function resetRigAnimationPose(rig: Model)
 		end
 		animator:StepAnimations(0)
 	end
+	local saved = editPoseStates[rig]
+	if saved then
+		for part, state in saved do
+			if part.Parent then
+				part.CFrame = state.cframe
+				part.Anchored = state.anchored
+			end
+		end
+		editPoseStates[rig] = nil
+	end
 	for _, descendant in rig:GetDescendants() do
 		if descendant:IsA("Motor6D") or descendant:IsA("AnimationConstraint") then
 			descendant.Transform = CFrame.identity
@@ -1588,7 +1968,7 @@ local function resetRigAnimationPose(rig: Model)
 	end
 end
 
-local function sequenceDuration(sequence: KeyframeSequence): number
+sequenceDuration = function(sequence: KeyframeSequence): number
 	local duration = 0
 	for _, keyframe in sequence:GetKeyframes() do
 		duration = math.max(duration, keyframe.Time)
@@ -1596,7 +1976,7 @@ local function sequenceDuration(sequence: KeyframeSequence): number
 	return duration
 end
 
-local function applyKeyframePose(rig: Model, keyframe: Keyframe): number
+applyKeyframePose = function(rig: Model, keyframe: Keyframe): number
 	local posesByName: { [string]: Pose } = {}
 	for _, descendant in keyframe:GetDescendants() do
 		if descendant:IsA("Pose") then
@@ -1605,14 +1985,44 @@ local function applyKeyframePose(rig: Model, keyframe: Keyframe): number
 	end
 
 	local applied = 0
-	for _, descendant in rig:GetDescendants() do
-		if descendant:IsA("Motor6D") or descendant:IsA("AnimationConstraint") then
-			local child = descendant.Part1
-			local pose = if child then posesByName[child.Name] else nil
+	if not RunService:IsRunning() then
+		if not editPoseStates[rig] then
+			local state = {}
+			for _, descendant in rig:GetDescendants() do
+				if descendant:IsA("BasePart") then
+					state[descendant] = { cframe = descendant.CFrame, anchored = descendant.Anchored }
+					descendant.Anchored = true
+				end
+			end
+			editPoseStates[rig] = state
+		end
+		local joints = {}
+		local jointByChild = {}
+		for _, descendant in rig:GetDescendants() do
+			if (descendant:IsA("Motor6D") or descendant:IsA("AnimationConstraint")) and descendant.Part0 and descendant.Part1 then
+				table.insert(joints, descendant)
+				jointByChild[descendant.Part1] = descendant
+			end
+		end
+		local function depth(joint)
+			local value, parent = 0, jointByChild[joint.Part0]
+			while parent and value < #joints do value += 1; parent = jointByChild[parent.Part0] end
+			return value
+		end
+		table.sort(joints, function(a, b) return depth(a) < depth(b) end)
+		for _, joint in joints do
+			local pose = posesByName[joint.Part1.Name]
 			if pose then
-				descendant.Transform = pose.CFrame
+				joint.Part1.CFrame = joint.Part0.CFrame * joint.C0 * pose.CFrame * joint.C1:Inverse()
 				applied += 1
 			end
+		end
+	end
+	for _, descendant in rig:GetDescendants() do
+		if RunService:IsRunning() and (descendant:IsA("Motor6D") or descendant:IsA("AnimationConstraint")) then
+			local child = descendant.Part1
+			local pose = if child then posesByName[child.Name] else nil
+			if pose then descendant.Transform = pose.CFrame; applied += 1 end
 		elseif descendant:IsA("Bone") then
 			local pose = posesByName[descendant.Name]
 			if pose then
@@ -1622,6 +2032,137 @@ local function applyKeyframePose(rig: Model, keyframe: Keyframe): number
 		end
 	end
 	return applied
+end
+
+local function nearestKeyframe(sequence: KeyframeSequence, requestedTime: number): Keyframe?
+	local nearest, distance = nil, math.huge
+	for _, keyframe in sequence:GetKeyframes() do
+		local current = math.abs(keyframe.Time - requestedTime)
+		if current < distance then nearest, distance = keyframe, current end
+	end
+	return nearest
+end
+
+local function removeExecutableDescendants(root: Instance)
+	for _, descendant in root:GetDescendants() do
+		if descendant:IsA("LuaSourceContainer") then descendant:Destroy() end
+	end
+end
+
+local function styleGhost(rig: Model, color: Color3, transparency: number)
+	for _, descendant in rig:GetDescendants() do
+		if descendant:IsA("BasePart") then
+			descendant.Anchored = true
+			descendant.CanCollide = false
+			descendant.CanQuery = false
+			descendant.CanTouch = false
+			descendant.Material = Enum.Material.ForceField
+			descendant.Color = color
+			descendant.Transparency = transparency
+		elseif descendant:IsA("Decal") or descendant:IsA("Texture") then
+			descendant.Transparency = 1
+		end
+	end
+end
+
+handlers["animation.createReviewGuides"] = function(params)
+	return withRecording("Create Motion Director ghost and motion-path review", function()
+		local rig = selectedRig()
+		if not rig then error("Select the target rig before creating review guides.") end
+		local committed = ReplicatedStorage:FindFirstChild("MotionDirectorAnimations")
+		local sequence = committed and committed:FindFirstChild(params.animationName)
+		if not sequence or not sequence:IsA("KeyframeSequence") then
+			error("Committed animation not found: " .. tostring(params.animationName))
+		end
+		local previous = workspace:FindFirstChild("MotionDirectorReviewGuides")
+		if previous then previous:Destroy() end
+		local guides = Instance.new("Folder")
+		guides.Name = "MotionDirectorReviewGuides"
+		guides:SetAttribute("AnimationName", sequence.Name)
+		guides.Parent = workspace
+		local duration = sequenceDuration(sequence)
+		local colors = {
+			Color3.fromRGB(70, 170, 255), Color3.fromRGB(255, 100, 160),
+			Color3.fromRGB(105, 255, 170), Color3.fromRGB(255, 205, 80),
+		}
+		local ghostCount = 0
+		for index, normalized in ipairs(params.normalizedTimes or {}) do
+			local keyframe = nearestKeyframe(sequence, duration * math.clamp(normalized, 0, 1))
+			if keyframe then
+				local ghost = rig:Clone()
+				removeExecutableDescendants(ghost)
+				ghost.Name = string.format("Ghost_%02d_%0.3f", index, normalized)
+				ghost.Parent = guides
+				applyKeyframePose(ghost, keyframe)
+				styleGhost(ghost, colors[((index - 1) % #colors) + 1], params.ghostTransparency or 0.72)
+				ghost:SetAttribute("NormalizedTime", normalized)
+				ghostCount += 1
+			end
+		end
+
+		local pathPoints = 0
+		local effectors = params.effectors or { "Head", "Right Arm", "Left Arm", "Right Leg", "Left Leg" }
+		local keyframes = sequence:GetKeyframes()
+		table.sort(keyframes, function(a, b) return a.Time < b.Time end)
+		local maximumSamples = math.clamp(params.maxPathSamples or 120, 2, 240)
+		local stride = math.max(1, math.ceil(#keyframes / maximumSamples))
+		local probe = rig:Clone()
+		removeExecutableDescendants(probe)
+		probe.Name = "MotionPathProbe"
+		probe.Parent = guides
+		local pathFolder = Instance.new("Folder")
+		pathFolder.Name = "MotionPaths"
+		pathFolder.Parent = guides
+		for effectorIndex, effectorName in ipairs(effectors) do
+			local previousAttachment = nil
+			for keyframeIndex = 1, #keyframes, stride do
+				local keyframe = keyframes[keyframeIndex]
+				applyKeyframePose(probe, keyframe)
+				local effector = probe:FindFirstChild(effectorName, true)
+				if effector and effector:IsA("BasePart") then
+					local point = Instance.new("Part")
+					point.Name = effectorName .. "_PathPoint"
+					point.Shape = Enum.PartType.Ball
+					point.Size = Vector3.new(0.09, 0.09, 0.09)
+					point.CFrame = CFrame.new(effector.Position)
+					point.Anchored = true
+					point.CanCollide, point.CanQuery, point.CanTouch = false, false, false
+					point.Material = Enum.Material.Neon
+					point.Color = colors[((effectorIndex - 1) % #colors) + 1]
+					point.Transparency = 0.15
+					point.Parent = pathFolder
+					local attachment = Instance.new("Attachment")
+					attachment.Parent = point
+					if previousAttachment then
+						local beam = Instance.new("Beam")
+						beam.Attachment0, beam.Attachment1 = previousAttachment, attachment
+						beam.Width0, beam.Width1 = 0.035, 0.035
+						beam.FaceCamera = true
+						beam.Color = ColorSequence.new(point.Color)
+						beam.Transparency = NumberSequence.new(0.1)
+						beam.Parent = point
+					end
+					previousAttachment = attachment
+					pathPoints += 1
+				end
+			end
+		end
+		resetRigAnimationPose(probe)
+		probe:Destroy()
+		Selection:Set({ rig })
+		return {
+			status = "review-guides-created", animationName = sequence.Name,
+			ghostCount = ghostCount, pathPointCount = pathPoints, path = pathOf(guides),
+		}
+	end)
+end
+
+handlers["animation.clearReviewGuides"] = function(_params)
+	return withRecording("Clear Motion Director review guides", function()
+		local guides = workspace:FindFirstChild("MotionDirectorReviewGuides")
+		if guides then guides:Destroy() end
+		return { status = "review-guides-cleared" }
+	end)
 end
 
 handlers["animation.poseCommittedAtTime"] = function(params)

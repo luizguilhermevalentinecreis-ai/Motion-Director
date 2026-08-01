@@ -2,7 +2,9 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { StudioBridge } from "./bridge.js";
-import { animationDraftSchema, validateTemporalIntegrity } from "./domain.js";
+import { animationEditProgramSchema, applyAnimationEditProgram } from "./draft-editing.js";
+import { animationLayerOptionsSchema, composeAnimationLayer } from "./animation-layers.js";
+import { animationDraftSchema, validateTemporalIntegrity, vector3Schema } from "./domain.js";
 import {
   ANIMATION_CONTRACT_GUIDE,
   PROFESSIONAL_AUTHORING_PROTOCOL,
@@ -18,7 +20,7 @@ const bridge = new StudioBridge(
 
 const server = new McpServer({
   name: "roblox-motion-director",
-  version: "0.5.0",
+  version: "0.9.0",
 });
 
 server.registerResource(
@@ -185,6 +187,69 @@ server.registerTool(
       return errorContent(error);
     }
   },
+);
+
+server.registerTool(
+  "list_shared_director_markers",
+  {
+    title: "List shared Motion, VFX, camera and audio markers",
+    description: "Reads the compact DirectorMarkerBus published inside ReplicatedStorage so all director systems can align impacts, contacts, beats and recoveries to one time source.",
+    inputSchema: {},
+  },
+  async () => {
+    try { return jsonContent(await bridge.executeAny("timeline.listMarkers", {}, 15_000)); }
+    catch (error) { return errorContent(error); }
+  },
+);
+
+server.registerTool(
+  "create_native_ik_control",
+  {
+    title: "Create a native Roblox IK control",
+    description: "Creates a real IKControl on the selected R15/custom rig with an explicit chain root, end effector, world-space target, optional pole, weight, priority and critically damped smoothing. R6 has only limited single-segment usefulness.",
+    inputSchema: {
+      controlName: z.string().min(1).max(120), chainRootName: z.string().min(1).max(120), endEffectorName: z.string().min(1).max(120),
+      controlType: z.enum(["position", "transform"]).default("transform"),
+      targetPosition: vector3Schema, targetRotationDegrees: vector3Schema.default({ x: 0, y: 0, z: 0 }), poleName: z.string().max(120).optional(),
+      weight: z.number().min(0).max(1).default(1), smoothTime: z.number().min(0).max(2).default(0), priority: z.number().int().min(-100).max(100).default(0),
+      contactKind: z.enum(["footLock", "handLock", "aim", "prop", "custom"]).default("custom"),
+    },
+  },
+  async input => { try { return jsonContent(await bridge.executeAny("animation.createIkControl", input, 120_000)); } catch (error) { return errorContent(error); } },
+);
+
+server.registerTool(
+  "create_grounded_foot_locks",
+  {
+    title: "Create grounded foot locks on the selected rig",
+    description: "Raycasts from named foot effectors, creates world-space contact targets aligned to surface normals, and configures high-priority Transform IKControls to eliminate foot sliding and floating.",
+    inputSchema: {
+      feet: z.array(z.object({ controlName: z.string().min(1), chainRootName: z.string().min(1), endEffectorName: z.string().min(1), poleName: z.string().optional() })).min(1).max(8).optional(),
+      raycastDistance: z.number().min(0.1).max(100).default(8), soleOffset: z.number().min(-2).max(2).default(0.05),
+      weight: z.number().min(0).max(1).default(1), smoothTime: z.number().min(0).max(2).default(0), priority: z.number().int().min(-100).max(100).default(20),
+    },
+  },
+  async input => { try { return jsonContent(await bridge.executeAny("animation.createFootLocks", input, 120_000)); } catch (error) { return errorContent(error); } },
+);
+
+server.registerTool(
+  "audit_native_ik_contacts",
+  {
+    title: "Audit IK contact error",
+    description: "Measures live world-space end-effector distance to each Motion Director IK target and reports locked, warning or failing contact status.",
+    inputSchema: {},
+  },
+  async () => { try { return jsonContent(await bridge.executeAny("animation.auditIkContacts", {}, 30_000)); } catch (error) { return errorContent(error); } },
+);
+
+server.registerTool(
+  "remove_native_ik_controls",
+  {
+    title: "Remove Motion Director IK controls",
+    description: "Removes only IKControls and target helpers created by Motion Director from the selected rig, with Studio undo support.",
+    inputSchema: {},
+  },
+  async () => { try { return jsonContent(await bridge.executeAny("animation.removeIkControls", {}, 120_000)); } catch (error) { return errorContent(error); } },
 );
 
 server.registerTool(
@@ -384,6 +449,68 @@ server.registerTool(
       valid: validateTemporalIntegrity(parsed).length === 0,
       report: reviewDraft(parsed),
     });
+  },
+);
+
+server.registerTool(
+  "edit_animation_draft",
+  {
+    title: "Edit an animation draft with precise operations",
+    description:
+      "Applies bounded non-destructive operations to an existing draft: upsert poses, delete/retime/offset ranges, copy or mirror motion between joints, change easing, and densify in-betweens. Returns a complete revised draft without touching Studio.",
+    inputSchema: {
+      draft: animationDraftSchema,
+      program: animationEditProgramSchema,
+    },
+  },
+  async ({ draft, program }) => {
+    try {
+      const edited = applyAnimationEditProgram(draft, program);
+      return jsonContent({
+        draft: edited,
+        summary: {
+          operationCount: program.operations.length,
+          trackCount: edited.tracks.length,
+          keyCount: edited.tracks.reduce((sum, track) => sum + track.keys.length, 0),
+          duration: edited.duration,
+        },
+        report: reviewDraft(edited),
+      });
+    } catch (error) {
+      return errorContent(error);
+    }
+  },
+);
+
+server.registerTool(
+  "compose_animation_layer",
+  {
+    title: "Blend a professional animation layer",
+    description:
+      "Combines a base draft with an additive or override layer using a joint mask, time range, weight and local dense resampling. Use it for recoil, breathing, acting, upper-body attacks and non-destructive polish without resending per-frame edits.",
+    inputSchema: {
+      baseDraft: animationDraftSchema,
+      layerDraft: animationDraftSchema,
+      options: animationLayerOptionsSchema,
+    },
+  },
+  async ({ baseDraft, layerDraft, options }) => {
+    try {
+      const draft = composeAnimationLayer(baseDraft, layerDraft, options);
+      return jsonContent({
+        draft,
+        summary: {
+          mode: options.mode,
+          weight: options.weight,
+          trackCount: draft.tracks.length,
+          keyCount: draft.tracks.reduce((sum, track) => sum + track.keys.length, 0),
+          sampleRate: draft.bakeFramesPerSecond,
+        },
+        report: reviewDraft(draft),
+      });
+    } catch (error) {
+      return errorContent(error);
+    }
   },
 );
 
@@ -644,6 +771,45 @@ server.registerTool(
   async (input) => {
     try {
       return jsonContent(await bridge.execute("animation.poseCommittedAtTime", input, 120_000));
+    } catch (error) {
+      return errorContent(error);
+    }
+  },
+);
+
+server.registerTool(
+  "create_animation_ghosts_and_motion_paths",
+  {
+    title: "Create Studio-native animation ghosts and motion paths",
+    description:
+      "Builds translucent ghost poses and colored head/limb trajectories for a committed animation directly in Edit mode, making spacing, arcs, contacts and silhouette changes visually inspectable without playback.",
+    inputSchema: {
+      animationName: z.string().min(1).max(120),
+      normalizedTimes: z.array(z.number().min(0).max(1)).max(16).default([0, 0.25, 0.5, 0.75, 1]),
+      effectors: z.array(z.string().min(1).max(120)).max(16).default(["Head", "Right Arm", "Left Arm", "Right Leg", "Left Leg"]),
+      ghostTransparency: z.number().min(0.2).max(0.95).default(0.72),
+      maxPathSamples: z.number().int().min(2).max(240).default(120),
+    },
+  },
+  async (input) => {
+    try {
+      return jsonContent(await bridge.execute("animation.createReviewGuides", input, 120_000));
+    } catch (error) {
+      return errorContent(error);
+    }
+  },
+);
+
+server.registerTool(
+  "clear_animation_review_guides",
+  {
+    title: "Clear animation ghosts and motion paths",
+    description: "Removes the reversible MotionDirectorReviewGuides hierarchy from Workspace.",
+    inputSchema: {},
+  },
+  async () => {
+    try {
+      return jsonContent(await bridge.execute("animation.clearReviewGuides", {}, 30_000));
     } catch (error) {
       return errorContent(error);
     }
