@@ -11,6 +11,21 @@ For every turn about animation, rigs, references, authoring, refinement, convers
 3. If this action is missing, tell the owner to re-import `/openapi.json`.
 4. Apply approved entries. The user's explicit request overrides general guidance.
 
+## Uploaded reference routing
+
+Use uploaded Knowledge as a professional handbook, not as a substitute for the live snapshot. Read only the files relevant to the task:
+
+- `KNOWLEDGE.md` for authority order and routing.
+- `PROFESSIONAL_ANIMATION_MANUAL.md` for craft and body mechanics.
+- `RIGS_AND_TRANSFORM_SPACES.md` for topology, bases, FK/IK, contacts, and retargeting.
+- `AUTHORING_WORKFLOWS.md` for production recipes.
+- `ACTION_TOOL_REFERENCE.md` for Action selection and token-efficient draft/job flow.
+- `QUALITY_AND_VISUAL_REVIEW.md` for review gates and diagnosis.
+- `REFERENCE_STUDY_AND_STYLE.md` for reference analysis and originality.
+- `TROUBLESHOOTING.md` for connection, schema, preview, bake, and attachment failures.
+
+Resolve conflicts by this order: user's current feedback, live global knowledge, inspected Studio evidence, uploaded manuals, general knowledge. Never quote a static file's version as current when the live Action is available.
+
 ## Connect to Studio
 
 1. Ask for the personal code shown by the Motion Director plugin when Studio work is requested.

@@ -8,11 +8,24 @@
 
 ## Instructions
 
-Copy the complete contents of `INSTRUCTIONS.md` into the GPT **Instructions** field.
+Copy the complete contents of `INSTRUCTIONS.md` into the GPT **Instructions** field. Do not paste the other manuals into Instructions; upload them as Knowledge files.
 
 ## Knowledge upload
 
-Upload `KNOWLEDGE.md` in the GPT **Knowledge** section. Do not upload secrets, pairing codes, place files, or private animation exports.
+Upload all eight files below in the GPT **Knowledge** section:
+
+1. `KNOWLEDGE.md`
+2. `PROFESSIONAL_ANIMATION_MANUAL.md`
+3. `RIGS_AND_TRANSFORM_SPACES.md`
+4. `AUTHORING_WORKFLOWS.md`
+5. `ACTION_TOOL_REFERENCE.md`
+6. `QUALITY_AND_VISUAL_REVIEW.md`
+7. `REFERENCE_STUDY_AND_STYLE.md`
+8. `TROUBLESHOOTING.md`
+
+`KNOWLEDGE.md` is the index. The other files provide deeper craft, rig, workflow, tool, review, reference, and troubleshooting context. The live Action remains authoritative for the current approved global snapshot.
+
+Do not upload secrets, pairing codes, environment files, place files, private animation exports, or the repository source.
 
 ## Action
 
@@ -50,12 +63,13 @@ Detected operations should include:
 
 1. Ask: `Consulte o conhecimento global e diga a versão atual.`
 2. Confirm the GPT calls `getMotionDirectorGlobalKnowledge` before answering.
-3. Open Studio, enable HTTP Requests, open Motion Director, choose `CHATGPT WEB`, and copy the personal code.
-4. Ask the GPT to check Studio status with the code.
-5. Select a disposable test rig and request one pose or short draft.
-6. Confirm write approval appears only for write operations.
-7. Verify validation, staging, polling, commit, and AnimSave attachment on a complete-animation request.
-8. Verify a preview-only request does not commit.
+3. Ask it to explain which uploaded manual it would use for an R6 kick; it should route to rig, craft, workflow, and review files without replacing the live snapshot.
+4. Open Studio, enable HTTP Requests, open Motion Director, choose `CHATGPT WEB`, and copy the personal code.
+5. Ask the GPT to check Studio status with the code.
+6. Select a disposable test rig and request one pose or short draft.
+7. Confirm write approval appears only for write operations.
+8. Verify validation, staging, polling, commit, and AnimSave attachment on a complete-animation request.
+9. Verify a preview-only request does not commit.
 
 ## Publishing
 

@@ -12,7 +12,14 @@ Motion Director connects a Custom GPT to the user's open Roblox Studio through a
 ## Files for the GPT editor
 
 - `gpt-custom/INSTRUCTIONS.md` — paste into Instructions. It is kept below the editor's 8,000-character limit.
-- `gpt-custom/KNOWLEDGE.md` — upload as a Knowledge file.
+- `gpt-custom/KNOWLEDGE.md` — upload as the Knowledge index.
+- `gpt-custom/PROFESSIONAL_ANIMATION_MANUAL.md` — professional craft and body mechanics.
+- `gpt-custom/RIGS_AND_TRANSFORM_SPACES.md` — rig topology, spaces, FK/IK, contacts, and retargeting.
+- `gpt-custom/AUTHORING_WORKFLOWS.md` — practical production recipes.
+- `gpt-custom/ACTION_TOOL_REFERENCE.md` — Actions, draft lifecycle, authorization, and token economy.
+- `gpt-custom/QUALITY_AND_VISUAL_REVIEW.md` — visual and post-bake acceptance gates.
+- `gpt-custom/REFERENCE_STUDY_AND_STYLE.md` — reference analysis and style extraction.
+- `gpt-custom/TROUBLESHOOTING.md` — setup and authoring failure diagnosis.
 - `gpt-custom/CONFIG.md` — exact field values, starters, capabilities, URLs, and smoke test.
 
 Do not upload the whole repository, place files, plugin source, environment files, Redis credentials, or pairing codes to GPT Knowledge.
@@ -25,7 +32,7 @@ GPT creation and editing currently happen on ChatGPT web and require a plan/work
 2. Open the direct configuration view instead of relying only on the conversational builder.
 3. Set the name and description from `gpt-custom/CONFIG.md`.
 4. Paste all of `gpt-custom/INSTRUCTIONS.md` into **Instructions**.
-5. Upload `gpt-custom/KNOWLEDGE.md` under **Knowledge**.
+5. Upload all eight Knowledge files listed in `gpt-custom/CONFIG.md` under **Knowledge**. Upload each file separately so its filename remains available for routing.
 6. Add the conversation starters from `CONFIG.md`.
 7. Under **Actions**, select **Create new action**.
 8. Set Authentication to **None**. The persistent Studio pairing code provides beta session authorization; never hardcode it in the GPT.
@@ -75,7 +82,7 @@ Use this whenever the repository Action schema or instruction package changes:
 
 1. Open `https://chatgpt.com/gpts/mine` and edit Motion Director.
 2. Replace Instructions with the current `gpt-custom/INSTRUCTIONS.md`.
-3. Remove the old Knowledge file and upload the current `gpt-custom/KNOWLEDGE.md` so ChatGPT does not index duplicate versions.
+3. Remove every old Motion Director Knowledge file. Upload the current eight-file set listed in `gpt-custom/CONFIG.md` so ChatGPT does not index duplicate versions.
 4. Open the existing Action.
 5. Re-import `https://motion-director-relay.onrender.com/openapi.json`. If the editor does not refresh operations reliably, delete that Action and create it again with Authentication **None**.
 6. Re-enter the privacy URL if the editor clears it.

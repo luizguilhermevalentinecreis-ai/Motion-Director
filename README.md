@@ -83,4 +83,6 @@ See `docs/CHATGPT_CUSTOM_GPT.md` for the complete Custom GPT deployment and
 pairing workflow.
 
 The ready-to-copy GPT package is in `gpt-custom/`: paste `INSTRUCTIONS.md`,
-upload `KNOWLEDGE.md`, and follow the exact field values in `CONFIG.md`.
+upload the eight Knowledge manuals listed in `CONFIG.md`, and follow its exact
+field values. The pack separates live global learning from detailed craft, rig,
+workflow, tool, review, reference-study, and troubleshooting guidance.
