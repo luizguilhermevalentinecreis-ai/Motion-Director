@@ -1789,6 +1789,6 @@ export class MotionDirectorWebRelay {
 <h2>Sharing</h2><p>Motion Director does not sell personal data. Approved global knowledge is intentionally shared with every Motion Director user; connection codes, place data, drafts, and proposal authorship are not included in the public snapshot.</p>
 <h2>User control</h2><p>Closing Studio or disabling remote mode makes the connected Studio unavailable. Users can discard staged animations before commit. Knowledge proposals remain unpublished until an authorized development installation approves them.</p>
 <h2>Security</h2><p>The relay exposes a fixed allowlist of animation operations and does not provide arbitrary Luau or filesystem execution.</p>
-<p>Contact: replace-this-address-before-publication@example.com</p></main></body></html>`;
+<p>Contact and deletion requests: <a href="https://github.com/luizguilhermevalentinecreis-ai/Motion-Director/issues">Motion Director GitHub Issues</a>.</p></main></body></html>`;
   }
 }

@@ -1,126 +1,113 @@
-# ChatGPT Web integration
+# Motion Director Custom GPT
 
-Motion Director supports two independent connection modes:
+Motion Director connects a Custom GPT to the user's open Roblox Studio through a public HTTPS relay. No OpenAI API key is required: ChatGPT supplies the model, the Action calls the relay, and the Studio plugin polls only commands addressed to its personal pairing code.
 
-- `LOCAL MCP`: the existing loopback MCP companion at `127.0.0.1:34718`;
-- `CHATGPT WEB`: a public HTTPS relay used by a Custom GPT Action.
+## Production URLs
 
-The Web mode does not use an OpenAI API key. ChatGPT supplies the model and the
-relay only routes bounded commands to the explicitly paired Studio plugin. The
-plugin creates one personal connection code per locally registered Roblox Studio
-user and reuses it across reconnections and later Studio launches.
+- Relay: `https://motion-director-relay.onrender.com`
+- Health: `https://motion-director-relay.onrender.com/health`
+- OpenAPI: `https://motion-director-relay.onrender.com/openapi.json`
+- Privacy: `https://motion-director-relay.onrender.com/privacy`
 
-## Runtime flow
+## Files for the GPT editor
 
-```text
-Custom GPT Action
-       |
-       | HTTPS
-       v
-Motion Director Web Relay
-       ^
-       | HTTPS polling from Studio
-       |
-Roblox Studio plugin
-```
+- `gpt-custom/INSTRUCTIONS.md` — paste into Instructions. It is kept below the editor's 8,000-character limit.
+- `gpt-custom/KNOWLEDGE.md` — upload as a Knowledge file.
+- `gpt-custom/CONFIG.md` — exact field values, starters, capabilities, URLs, and smoke test.
 
-The relay never exposes arbitrary Luau execution. `src/web-relay.ts` contains the
-allowlist of supported actions and their read/write classification.
+Do not upload the whole repository, place files, plugin source, environment files, Redis credentials, or pairing codes to GPT Knowledge.
 
-## Local relay test
+## Create the GPT
 
-```powershell
-$env:MOTION_PUBLIC_BASE_URL = "http://127.0.0.1:34719"
-npm run relay:dev
-```
+GPT creation and editing currently happen on ChatGPT web and require a plan/workspace that permits GPT creation.
 
-In the Studio plugin:
+1. Open `https://chatgpt.com/gpts` and select **Create**.
+2. Open the direct configuration view instead of relying only on the conversational builder.
+3. Set the name and description from `gpt-custom/CONFIG.md`.
+4. Paste all of `gpt-custom/INSTRUCTIONS.md` into **Instructions**.
+5. Upload `gpt-custom/KNOWLEDGE.md` under **Knowledge**.
+6. Add the conversation starters from `CONFIG.md`.
+7. Under **Actions**, select **Create new action**.
+8. Set Authentication to **None**. The persistent Studio pairing code provides beta session authorization; never hardcode it in the GPT.
+9. Select **Import from URL** and import:
+   `https://motion-director-relay.onrender.com/openapi.json`
+10. Confirm the editor detects these eight operations:
+    - `getMotionDirectorGlobalKnowledge`
+    - `proposeMotionDirectorGlobalKnowledge`
+    - `getMotionDirectorStudioStatus`
+    - `createMotionDirectorAnimationDraft`
+    - `editMotionDirectorAnimationDraft`
+    - `composeMotionDirectorAnimationLayer`
+    - `executeMotionDirectorAction`
+    - `getMotionDirectorJob`
+11. Set the Privacy Policy URL to:
+    `https://motion-director-relay.onrender.com/privacy`
+12. Do not enable GPT Apps; Apps and custom Actions are mutually exclusive. Other capabilities are optional as described in `CONFIG.md`.
+13. Keep sharing set to **Only me** until the Preview tests pass.
 
-1. Enable Studio HTTP requests.
-2. Enter `http://127.0.0.1:34719` in the relay URL field.
-3. Click `CHATGPT WEB`.
-4. Confirm that the user's persistent connection code appears.
+## Connect Roblox Studio
 
-This verifies the plugin-to-relay path. ChatGPT cannot call this localhost URL.
+1. Install/open the current Motion Director plugin.
+2. In Roblox Studio, enable **Game Settings > Security > Allow HTTP Requests**.
+3. Open the Motion Director panel.
+4. Select `CHATGPT WEB`.
+5. The default relay should already be `https://motion-director-relay.onrender.com`.
+6. Copy the personal persistent connection code. Treat it like a password while the plugin is online.
+7. Give the code only inside the current private GPT conversation when Studio work is needed.
 
-## Production deployment
+## Test before publishing
 
-The relay requires a Node.js 22+ host with HTTPS. Pairing sessions and jobs remain
-short-lived in memory. The developer-approved global knowledge snapshot uses
-Upstash Redis in production or an atomic JSON file during local development.
-Sticky sessions or a shared session store are still required before horizontally
-scaling live Studio sessions.
+In GPT Preview:
 
-Required environment variables:
+1. Ask it to consult global knowledge. It must call `getMotionDirectorGlobalKnowledge` first and report the snapshot version.
+2. Give the personal code and ask for Studio status.
+3. Select a disposable rig and request inspection only. Confirm no write approval is requested.
+4. Request a preview-only pose. Confirm it does not commit or attach.
+5. Request a complete short animation. Confirm the sequence is:
+   create draft ID -> validate -> stage -> poll -> post-bake audit -> commit -> poll -> attach -> visual review.
+6. Confirm the GPT does not claim draft creation is unavailable.
+7. Confirm R6 and R15/custom topology are detected from inspection rather than assumed.
+8. Close/disable the plugin and confirm Studio status reports offline without changing the personal code.
+
+## Update an existing GPT
+
+Use this whenever the repository Action schema or instruction package changes:
+
+1. Open `https://chatgpt.com/gpts/mine` and edit Motion Director.
+2. Replace Instructions with the current `gpt-custom/INSTRUCTIONS.md`.
+3. Remove the old Knowledge file and upload the current `gpt-custom/KNOWLEDGE.md` so ChatGPT does not index duplicate versions.
+4. Open the existing Action.
+5. Re-import `https://motion-director-relay.onrender.com/openapi.json`. If the editor does not refresh operations reliably, delete that Action and create it again with Authentication **None**.
+6. Re-enter the privacy URL if the editor clears it.
+7. Run the Preview tests above, especially any newly added operation.
+8. Select **Update** to publish the draft. Use the editor's version history if rollback is needed.
+
+Updating the Render service alone does not update the Action schema cached by an existing GPT; re-import the schema after endpoint or operation changes.
+
+## Runtime and security
+
+- Connection codes are stable per registered Studio user and remain usable only while that plugin is connected.
+- Plugin access uses a separate installation token; jobs are scoped to their pairing code.
+- Pairing sessions and jobs expire and are not stored as global knowledge.
+- Write actions require `confirmWrite=true`.
+- The relay exposes a fixed action allowlist, not arbitrary Luau.
+- Global knowledge proposals stay pending until an authorized development installation approves or rejects them.
+- Approved global knowledge is shared; codes, place data, drafts, identities, and unpublished animation matrices are excluded.
+
+For a large public launch, capability-code pairing should eventually be replaced or supplemented by account authentication, shared session storage, quotas, abuse monitoring, audit retention rules, and a documented deletion request process.
+
+## Self-hosting
+
+The relay needs Node.js 22+ and HTTPS. Typical Render variables are:
 
 ```text
 PORT=8080
 MOTION_RELAY_HOST=0.0.0.0
-MOTION_PUBLIC_BASE_URL=https://your-relay-domain.example
+MOTION_PUBLIC_BASE_URL=https://your-domain.example
 MOTION_KNOWLEDGE_REDIS_URL=https://your-upstash-endpoint
-MOTION_KNOWLEDGE_REDIS_TOKEN=server-side-token
+MOTION_KNOWLEDGE_REDIS_TOKEN=server-side-secret
 MOTION_KNOWLEDGE_REDIS_KEY=motion-director:global-knowledge:v1
-MOTION_KNOWLEDGE_DEVELOPER_INSTALLATIONS=development-plugin-installation-id
+MOTION_KNOWLEDGE_DEVELOPER_INSTALLATIONS=authorized-installation-id
 ```
 
-Build and start:
-
-```powershell
-npm ci
-npm run build
-npm run relay:start
-```
-
-The included `Dockerfile` provides the same production command.
-
-After deployment, verify:
-
-```text
-GET https://your-relay-domain.example/health
-GET https://your-relay-domain.example/openapi.json
-GET https://your-relay-domain.example/privacy
-```
-
-## Configure the Custom GPT
-
-1. Open the GPT builder in ChatGPT.
-2. Paste `gpt-custom/INSTRUCTIONS.md` into Instructions.
-3. Under Actions, create a new action.
-4. Choose `None` for authentication during the pairing-code beta.
-5. Import `https://your-relay-domain.example/openapi.json`.
-6. Set the privacy policy URL to `https://your-relay-domain.example/privacy`.
-7. Test all six operations in Preview:
-   - `getMotionDirectorGlobalKnowledge`
-   - `proposeMotionDirectorGlobalKnowledge`
-   - `getMotionDirectorStudioStatus`
-   - `createMotionDirectorAnimationDraft`
-   - `executeMotionDirectorAction`
-   - `getMotionDirectorJob`
-8. Before publishing, replace the policy contact with a real support contact.
-
-## Pairing and security
-
-- Personal connection codes contain ten non-ambiguous random characters.
-- The code is generated once and stored in the plugin settings for that Studio user.
-- Treat the code as a password because it remains valid whenever that user's plugin is online.
-- Plugin access uses a separate 256-bit token and SHA-256 comparison.
-- Codes expire when plugin heartbeats stop.
-- Jobs are scoped to the pairing code that created them.
-- Write actions require `confirmWrite=true`.
-- The relay accepts at most eight simultaneous jobs per Studio session.
-- Request bodies are capped at 4 MiB.
-- Authored blueprints are converted to quaternion drafts and stored under a
-  short-lived, Studio-scoped `draftId`; validation and staging accept that ID.
-- Pairing and job data expire automatically and are not persisted.
-- Global knowledge proposals remain pending until an allowlisted development
-  installation selects `COMMIT GLOBAL` or `REJECT`.
-- Published snapshots are readable by every chat and contain no connection code,
-  place identifier, proposal author, or unpublished animation data.
-
-For a larger public launch, add:
-
-- OAuth accounts instead of capability-code-only identity;
-- Redis-backed sessions and rate limiting;
-- structured audit logs with short retention;
-- abuse monitoring and per-account quotas;
-- deployment-specific terms, privacy contact, and deletion workflow.
+Never commit Redis tokens or other secrets. Build with `npm ci && npm run build`; start with `npm run relay:start`.

@@ -81,3 +81,6 @@ The Studio plugin sources are
 See `docs/ARCHITECTURE.md` for the contract and security model.
 See `docs/CHATGPT_CUSTOM_GPT.md` for the complete Custom GPT deployment and
 pairing workflow.
+
+The ready-to-copy GPT package is in `gpt-custom/`: paste `INSTRUCTIONS.md`,
+upload `KNOWLEDGE.md`, and follow the exact field values in `CONFIG.md`.
